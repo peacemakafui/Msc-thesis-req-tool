@@ -11,20 +11,47 @@ import {
   truncate,
 } from './limits'
 
-// OpenAI client
-export const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-})
+/**
+ * Provider clients are created lazily, not at module scope.
+ *
+ * The OpenAI SDK throws from its constructor when no API key is present. At
+ * module scope that turned a missing key into an *import-time* crash, which
+ * fails `next build` during page-data collection — a build that needs runtime
+ * secrets to succeed. Building must not depend on provider credentials.
+ *
+ * Creating them on demand also means a provider with no key configured simply
+ * fails its turn in the fallback chain, and the next provider is tried, instead
+ * of taking the whole app down.
+ */
 
-// Anthropic client
-export const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-})
+let openaiClient: OpenAI | null = null
+let anthropicClient: Anthropic | null = null
+let geminiClient: GoogleGenAI | null = null
 
-// Google GenAI client
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-})
+function getOpenAI(): OpenAI {
+  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is not configured')
+  openaiClient ??= new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  return openaiClient
+}
+
+function getAnthropic(): Anthropic {
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not configured')
+  anthropicClient ??= new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  return anthropicClient
+}
+
+function getGemini(): GoogleGenAI {
+  if (!process.env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY is not configured')
+  geminiClient ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY })
+  return geminiClient
+}
+
+/** True when at least one provider is configured — checked at request time. */
+export function hasAnyProvider(): boolean {
+  return Boolean(
+    process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY
+  )
+}
 
 const GEMINI_MODEL = 'gemini-2.5-flash-lite'
 const GPT_MODEL = 'gpt-4o-mini'
@@ -127,7 +154,7 @@ Return ONLY a JSON array, with no prose before or after it:
 
 export async function analyzeDocumentWithGemini(text: string) {
   try {
-    const response = await ai.models.generateContent({
+    const response = await getGemini().models.generateContent({
       model: GEMINI_MODEL,
       contents: analysisPrompt(text),
       config: { maxOutputTokens: MAX_OUTPUT_TOKENS.analysis },
@@ -144,7 +171,7 @@ export async function chatWithGemini(messages: ChatMessage[]) {
       .map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
       .join('\n\n')
 
-    const response = await ai.models.generateContent({
+    const response = await getGemini().models.generateContent({
       model: GEMINI_MODEL,
       contents: `${CHAT_SYSTEM_PROMPT}\n\nConversation so far:\n${conversationContext}`,
       config: { maxOutputTokens: MAX_OUTPUT_TOKENS.chat },
@@ -157,7 +184,7 @@ export async function chatWithGemini(messages: ChatMessage[]) {
 
 export async function analyzePDFWithGemini(base64PDF: string, filename: string) {
   try {
-    const response = await ai.models.generateContent({
+    const response = await getGemini().models.generateContent({
       model: GEMINI_MODEL,
       contents: [
         {
@@ -211,7 +238,7 @@ IMPORTANT:
 
 export async function analyzeDocumentWithGPT(text: string) {
   try {
-    const response = await openai.chat.completions.create({
+    const response = await getOpenAI().chat.completions.create({
       model: GPT_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.analysis,
       messages: [
@@ -232,7 +259,7 @@ export async function analyzeDocumentWithGPT(text: string) {
 
 export async function chatWithGPT(messages: ChatMessage[]) {
   try {
-    const response = await openai.chat.completions.create({
+    const response = await getOpenAI().chat.completions.create({
       model: GPT_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.chat,
       messages: [{ role: 'system', content: CHAT_SYSTEM_PROMPT }, ...capMessages(messages)],
@@ -248,7 +275,7 @@ export async function chatWithGPT(messages: ChatMessage[]) {
 
 export async function chatWithClaude(messages: ChatMessage[]) {
   try {
-    const response = await anthropic.messages.create({
+    const response = await getAnthropic().messages.create({
       model: CLAUDE_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.chat,
       system: CHAT_SYSTEM_PROMPT,
@@ -262,7 +289,7 @@ export async function chatWithClaude(messages: ChatMessage[]) {
 
 export async function analyzeDocumentWithClaude(text: string) {
   try {
-    const response = await anthropic.messages.create({
+    const response = await getAnthropic().messages.create({
       model: CLAUDE_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.analysis,
       messages: [{ role: 'user', content: analysisPrompt(text) }],
@@ -382,7 +409,7 @@ Use the provided requirements to populate relevant sections. Be professional, de
 Format the output in Markdown with proper headings, bullet points, and numbered lists.`
 
   try {
-    const geminiResponse = await ai.models.generateContent({
+    const geminiResponse = await getGemini().models.generateContent({
       model: GEMINI_MODEL,
       contents: prompt,
       config: { maxOutputTokens: MAX_OUTPUT_TOKENS.srs },
@@ -393,7 +420,7 @@ Format the output in Markdown with proper headings, bullet points, and numbered 
   }
 
   try {
-    const gptResponse = await openai.chat.completions.create({
+    const gptResponse = await getOpenAI().chat.completions.create({
       model: GPT_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.srs,
       messages: [
@@ -413,7 +440,7 @@ Format the output in Markdown with proper headings, bullet points, and numbered 
   }
 
   try {
-    const claudeResponse = await anthropic.messages.create({
+    const claudeResponse = await getAnthropic().messages.create({
       model: CLAUDE_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.srs,
       messages: [{ role: 'user', content: prompt }],
@@ -484,7 +511,7 @@ Example format:
   }
 
   try {
-    const geminiResponse = await ai.models.generateContent({
+    const geminiResponse = await getGemini().models.generateContent({
       model: GEMINI_MODEL,
       contents: prompt,
       config: { maxOutputTokens: MAX_OUTPUT_TOKENS.subTasks },
@@ -496,7 +523,7 @@ Example format:
   }
 
   try {
-    const gptResponse = await openai.chat.completions.create({
+    const gptResponse = await getOpenAI().chat.completions.create({
       model: GPT_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.subTasks,
       messages: [
@@ -512,7 +539,7 @@ Example format:
   }
 
   try {
-    const claudeResponse = await anthropic.messages.create({
+    const claudeResponse = await getAnthropic().messages.create({
       model: CLAUDE_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.subTasks,
       messages: [{ role: 'user', content: prompt }],
