@@ -4,18 +4,17 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { ArrowLeft } from 'lucide-react'
 import toast from 'react-hot-toast'
+import { Button, Card, Field, Input, Textarea } from '@/components/ui'
+import { MAX_PROJECT_DESCRIPTION_CHARS, MAX_PROJECT_NAME_CHARS } from '@/lib/limits'
 
 export default function NewProjectPage() {
   const router = useRouter()
   const [loading, setLoading] = useState(false)
-  const [formData, setFormData] = useState({
-    name: '',
-    description: ''
-  })
+  const [formData, setFormData] = useState({ name: '', description: '' })
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    
+
     if (!formData.name.trim()) {
       toast.error('Please enter a project name')
       return
@@ -26,94 +25,75 @@ export default function NewProjectPage() {
     try {
       const response = await fetch('/api/projects', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(formData)
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData),
       })
 
-      const data = await response.json()
+      const data = await response.json().catch(() => null)
 
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to create project')
+        throw new Error(data?.error || 'Failed to create project')
       }
 
-      toast.success('Project created successfully!')
+      toast.success('Project created')
       router.push('/dashboard/projects')
-    } catch (error: any) {
-      toast.error(error.message || 'Failed to create project')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to create project')
     } finally {
       setLoading(false)
     }
   }
 
   return (
-    <div className="p-8">
-      {/* Header */}
-      <div className="mb-8">
-        <button
-          onClick={() => router.back()}
-          className="flex items-center text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white mb-4"
-        >
-          <ArrowLeft className="h-4 w-4 mr-2" />
-          Back
-        </button>
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Create New Project</h1>
-        <p className="text-gray-600 dark:text-gray-300 mt-1">
-          Start a new requirements gathering project
-        </p>
-      </div>
+    <div className="mx-auto max-w-xl px-6 py-8 lg:px-10">
+      <button
+        onClick={() => router.back()}
+        className="mb-5 flex items-center gap-1.5 text-[13px] text-ink-muted transition-colors hover:text-ink"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" />
+        Back
+      </button>
 
-      {/* Form */}
-      <div className="max-w-2xl">
-        <form onSubmit={handleSubmit} className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 space-y-6">
-          <div>
-            <label htmlFor="name" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Project Name *
-            </label>
-            <input
-              type="text"
+      <h1 className="text-[22px] font-semibold text-ink">New project</h1>
+      <p className="mt-1 text-sm text-ink-muted">
+        A project groups the documents, requirements and conversations for one piece of work.
+      </p>
+
+      <Card className="mt-6 p-6">
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <Field label="Project name" required>
+            <Input
               id="name"
               value={formData.name}
-              onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-              placeholder="Enter project name"
+              onChange={e => setFormData({ ...formData, name: e.target.value })}
+              placeholder="Leave management system"
+              maxLength={MAX_PROJECT_NAME_CHARS}
               required
             />
-          </div>
+          </Field>
 
-          <div>
-            <label htmlFor="description" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              Description
-            </label>
-            <textarea
+          <Field label="Description" hint="Optional — helps the assistant understand the context">
+            <Textarea
               id="description"
               value={formData.description}
-              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+              onChange={e => setFormData({ ...formData, description: e.target.value })}
               rows={4}
-              className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-              placeholder="Describe your project (optional)"
+              maxLength={MAX_PROJECT_DESCRIPTION_CHARS}
+              placeholder="What is this project for?"
+              className="resize-y"
             />
-          </div>
+          </Field>
 
-          <div className="flex gap-4">
-            <button
-              type="submit"
-              disabled={loading}
-              className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {loading ? 'Creating...' : 'Create Project'}
-            </button>
-            <button
-              type="button"
-              onClick={() => router.back()}
-              className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-            >
+          <div className="flex gap-2 pt-1">
+            <Button type="submit" variant="primary" loading={loading} className="flex-1">
+              Create project
+            </Button>
+            <Button type="button" onClick={() => router.back()} disabled={loading}>
               Cancel
-            </button>
+            </Button>
           </div>
         </form>
-      </div>
+      </Card>
     </div>
   )
 }

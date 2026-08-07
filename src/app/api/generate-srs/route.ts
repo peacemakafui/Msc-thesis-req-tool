@@ -2,50 +2,43 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/prisma'
 import { requireAuth } from '@/lib/session'
 import { generateSRSDocument } from '@/lib/llm'
+import { consumeQuota } from '@/lib/rateLimit'
+import { apiError, PublicError } from '@/lib/apiError'
+import { MAX_SRS_REQUIREMENTS } from '@/lib/limits'
 
 export async function POST(request: NextRequest) {
   try {
     const user = await requireAuth()
     const { projectId, format = 'markdown' } = await request.json()
 
-    if (!projectId) {
-      return NextResponse.json(
-        { error: 'Project ID is required' },
-        { status: 400 }
-      )
+    if (typeof projectId !== 'string' || !projectId) {
+      throw new PublicError('Project ID is required')
     }
 
-    // Verify project ownership
-    const project = await prisma.project.findUnique({
-      where: {
-        id: projectId,
-        userId: user.id
-      },
+    const project = await prisma.project.findFirst({
+      where: { id: projectId, userId: user.id },
       include: {
         requirements: {
-          orderBy: [
-            { priority: 'desc' },
-            { type: 'asc' }
-          ]
-        }
-      }
+          orderBy: [{ priority: 'desc' }, { type: 'asc' }],
+          // Bound the prompt at the query, not just in the prompt builder.
+          take: MAX_SRS_REQUIREMENTS,
+        },
+        _count: { select: { requirements: true } },
+      },
     })
 
     if (!project) {
-      return NextResponse.json(
-        { error: 'Project not found or access denied' },
-        { status: 403 }
-      )
+      throw new PublicError('Project not found or access denied', 403)
     }
 
     if (project.requirements.length === 0) {
-      return NextResponse.json(
-        { error: 'No requirements found for this project' },
-        { status: 400 }
-      )
+      throw new PublicError('No requirements found for this project')
     }
 
-    // Generate SRS document using LLM
+    // SRS generation is the most expensive single call in the app (up to 4k
+    // output tokens across three providers), so it draws on the export quota.
+    await consumeQuota(user.id, 'export')
+
     const srsContent = await generateSRSDocument(
       project.requirements,
       project.name,
@@ -63,23 +56,12 @@ export async function POST(request: NextRequest) {
       metadata: {
         projectName: project.name,
         requirementsCount: project.requirements.length,
-        generatedAt: new Date().toISOString()
-      }
+        totalRequirements: project._count.requirements,
+        truncated: project._count.requirements > project.requirements.length,
+        generatedAt: new Date().toISOString(),
+      },
     })
-
-  } catch (error: any) {
-    console.error('Error generating SRS document:', error)
-    
-    if (error.message === 'Unauthorized') {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      )
-    }
-
-    return NextResponse.json(
-      { error: 'Failed to generate SRS document' },
-      { status: 500 }
-    )
+  } catch (error) {
+    return apiError('Error generating SRS document', error)
   }
 }

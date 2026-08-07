@@ -1,10 +1,24 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
+export const dynamic = 'force-dynamic'
+
+import { useState, useCallback, useEffect, useRef } from 'react'
+import Link from 'next/link'
 import { useDropzone } from 'react-dropzone'
-import { Upload, File, Loader2, CheckCircle, XCircle, Send, Trash2, FolderOpen } from 'lucide-react'
+import {
+  Upload,
+  File as FileIcon,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  ArrowUp,
+  X,
+  Sparkles,
+} from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { useSearchParams } from 'next/navigation'
+import { Badge, Button, Card, IconButton, Select, cn } from '@/components/ui'
+import { MAX_UPLOAD_BYTES } from '@/lib/limits'
 
 interface UploadedFile {
   id: string
@@ -30,63 +44,78 @@ interface Project {
   description: string | null
 }
 
+const SESSION_KEY = 'upload_session_state'
+
+/** How much document text to include when asking the assistant about a file.
+ *  The server truncates anyway; trimming here keeps the useful part. */
+const CHAT_CONTEXT_CHARS = 6_000
+
+const MAX_MB = Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))
+
 export default function UploadPage() {
   const searchParams = useSearchParams()
   const [files, setFiles] = useState<UploadedFile[]>([])
-  const [dragActive, setDragActive] = useState(false)
   const [selectedFile, setSelectedFile] = useState<UploadedFile | null>(null)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState('')
   const [isChatting, setIsChatting] = useState(false)
   const [projects, setProjects] = useState<Project[]>([])
-  const [selectedProjectId, setSelectedProjectId] = useState<string>('')
+  const [selectedProjectId, setSelectedProjectId] = useState('')
   const [loadingProjects, setLoadingProjects] = useState(true)
+  const [usage, setUsage] = useState<{
+    uploadDailyRemaining: number
+    uploadLifetimeRemaining: number
+    limits: { dailyUpload: number; lifetimeUpload: number }
+  } | null>(null)
 
-  // Session persistence key
-  const SESSION_KEY = 'upload_session_state'
+  const chatScrollRef = useRef<HTMLDivElement>(null)
 
-  // Load projects on mount
+  const fetchUsage = async () => {
+    try {
+      const res = await fetch('/api/usage')
+      if (res.ok) setUsage(await res.json())
+    } catch {
+      /* the meter is informational */
+    }
+  }
+
   useEffect(() => {
     fetchProjects()
+    fetchUsage()
   }, [])
 
-  // Set project from URL params
   useEffect(() => {
     const projectIdFromUrl = searchParams.get('projectId')
-    if (projectIdFromUrl) {
-      setSelectedProjectId(projectIdFromUrl)
-    }
+    if (projectIdFromUrl) setSelectedProjectId(projectIdFromUrl)
   }, [searchParams])
 
-  // Load session state from localStorage on mount
   useEffect(() => {
     try {
       const savedState = localStorage.getItem(SESSION_KEY)
       if (savedState) {
         const parsed = JSON.parse(savedState)
-        if (parsed.selectedProjectId) {
-          setSelectedProjectId(parsed.selectedProjectId)
-        }
-        // Note: We don't restore files/chat as they're tied to backend data
-        // Only restore UI state like selected project
+        // Only the project selection is restored — file state lives server-side.
+        if (parsed.selectedProjectId) setSelectedProjectId(parsed.selectedProjectId)
       }
     } catch (error) {
       console.error('Failed to load session state:', error)
     }
   }, [])
 
-  // Save session state to localStorage whenever it changes
   useEffect(() => {
     try {
-      const stateToSave = {
-        selectedProjectId,
-        timestamp: new Date().toISOString()
-      }
-      localStorage.setItem(SESSION_KEY, JSON.stringify(stateToSave))
+      localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({ selectedProjectId, timestamp: new Date().toISOString() })
+      )
     } catch (error) {
       console.error('Failed to save session state:', error)
     }
   }, [selectedProjectId])
+
+  useEffect(() => {
+    chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: 'smooth' })
+  }, [chatMessages, isChatting])
 
   const fetchProjects = async () => {
     try {
@@ -94,9 +123,7 @@ export default function UploadPage() {
       if (response.ok) {
         const data = await response.json()
         setProjects(data.projects || [])
-        
-        // If no project selected and projects exist, select the first one
-        if (!selectedProjectId && data.projects.length > 0) {
+        if (!selectedProjectId && data.projects?.length > 0) {
           setSelectedProjectId(data.projects[0].id)
         }
       }
@@ -107,102 +134,101 @@ export default function UploadPage() {
     }
   }
 
-  const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    if (!selectedProjectId) {
-      toast.error('Please select a project first')
-      return
-    }
-
-    const newFiles = acceptedFiles.map(file => ({
-      id: Date.now() + Math.random().toString(),
-      name: file.name,
-      size: file.size,
-      status: 'uploading' as const
-    }))
-
-    setFiles(prev => [...prev, ...newFiles])
-
-    for (let i = 0; i < acceptedFiles.length; i++) {
-      const file = acceptedFiles[i]
-      const fileId = newFiles[i].id
-
-      try {
-        const formData = new FormData()
-        formData.append('file', file)
-        formData.append('projectId', selectedProjectId)
-
-        setFiles(prev => prev.map(f => 
-          f.id === fileId ? { ...f, status: 'uploading' } : f
-        ))
-
-        const response = await fetch('/api/upload', {
-          method: 'POST',
-          body: formData
-        })
-
-        if (!response.ok) {
-          throw new Error('Upload failed')
-        }
-
-        const result = await response.json()
-
-        setFiles(prev => prev.map(f => 
-          f.id === fileId ? { ...f, status: 'processing' } : f
-        ))
-
-        const processResponse = await fetch('/api/process-document', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            documentId: result.documentId
-          })
-        })
-
-        if (!processResponse.ok) {
-          throw new Error('Processing failed')
-        }
-
-        const processResult = await processResponse.json()
-
-        const completedFile = { 
-          ...newFiles[i], 
-          status: 'completed' as const,
-          requirements: processResult.requirements || [],
-          extractedText: result.extractedText || '',
-          documentId: result.documentId
-        }
-        
-        setFiles(prev => prev.map(f => 
-          f.id === fileId ? completedFile : f
-        ))
-
-        if (i === 0) {
-          setSelectedFile(completedFile)
-          setChatMessages([{
-            id: '1',
-            content: `I've analyzed "${file.name}" and generated ${processResult.requirements?.length || 0} requirements. You can see the extracted text on the right and refine the requirements by chatting with me.`,
-            role: 'assistant',
-            timestamp: new Date()
-          }])
-        }
-
-        toast.success(`${file.name} processed successfully! Generated ${processResult.requirements?.length || 0} requirements.`)
-
-      } catch (error) {
-        console.error('Upload error:', error)
-        setFiles(prev => prev.map(f => 
-          f.id === fileId ? { 
-            ...f, 
-            status: 'error',
-            error: error instanceof Error ? error.message : 'Unknown error'
-          } : f
-        ))
-        toast.error(`Failed to process ${file.name}`)
+  const onDrop = useCallback(
+    async (acceptedFiles: File[]) => {
+      if (!selectedProjectId) {
+        toast.error('Select a project first')
+        return
       }
-    }
-  }, [selectedProjectId])
+
+      const newFiles: UploadedFile[] = acceptedFiles.map(file => ({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: file.name,
+        size: file.size,
+        status: 'uploading',
+      }))
+
+      setFiles(prev => [...prev, ...newFiles])
+
+      for (let i = 0; i < acceptedFiles.length; i++) {
+        const file = acceptedFiles[i]
+        const fileId = newFiles[i].id
+
+        const markError = (message: string) => {
+          setFiles(prev =>
+            prev.map(f => (f.id === fileId ? { ...f, status: 'error', error: message } : f))
+          )
+        }
+
+        try {
+          const formData = new FormData()
+          formData.append('file', file)
+          formData.append('projectId', selectedProjectId)
+
+          const response = await fetch('/api/upload', { method: 'POST', body: formData })
+          const result = await response.json().catch(() => null)
+
+          // Quota and validation failures carry a message worth showing.
+          if (!response.ok) {
+            if (response.status === 429) fetchUsage()
+            throw new Error(result?.error || 'Upload failed')
+          }
+
+          setFiles(prev => prev.map(f => (f.id === fileId ? { ...f, status: 'processing' } : f)))
+
+          const processResponse = await fetch('/api/process-document', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ documentId: result.documentId }),
+          })
+          const processResult = await processResponse.json().catch(() => null)
+
+          if (!processResponse.ok) {
+            if (processResponse.status === 429) fetchUsage()
+            throw new Error(processResult?.error || 'Processing failed')
+          }
+
+          fetchUsage()
+
+          const completedFile: UploadedFile = {
+            ...newFiles[i],
+            status: 'completed',
+            requirements: processResult.requirements || [],
+            extractedText: result.extractedText || '',
+            documentId: result.documentId,
+          }
+
+          setFiles(prev => prev.map(f => (f.id === fileId ? completedFile : f)))
+
+          if (i === 0) {
+            setSelectedFile(completedFile)
+            setChatMessages([
+              {
+                id: 'intro',
+                content: `I analysed "${file.name}" and generated ${
+                  processResult.requirements?.length || 0
+                } requirements. Ask me to refine them, or tell me what's missing.`,
+                role: 'assistant',
+                timestamp: new Date(),
+              },
+            ])
+          }
+
+          toast.success(
+            `${file.name}: ${processResult.requirements?.length || 0} requirements generated`
+          )
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error'
+          console.error('Upload error:', error)
+          markError(message)
+          toast.error(message)
+        }
+      }
+    },
+    [selectedProjectId]
+  )
+
+  const outOfQuota = usage?.uploadLifetimeRemaining === 0 || usage?.uploadDailyRemaining === 0
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -210,24 +236,28 @@ export default function UploadPage() {
       'application/pdf': ['.pdf'],
       'application/msword': ['.doc'],
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
-      'text/plain': ['.txt']
+      'text/plain': ['.txt'],
     },
-    maxSize: 10 * 1024 * 1024,
-    onDragEnter: () => setDragActive(true),
-    onDragLeave: () => setDragActive(false)
+    maxSize: MAX_UPLOAD_BYTES,
+    disabled: !selectedProjectId || outOfQuota,
+    onDropRejected: rejections => {
+      const reason = rejections[0]?.errors[0]
+      toast.error(
+        reason?.code === 'file-too-large'
+          ? `File is too large. The maximum is ${MAX_MB}MB.`
+          : 'That file type is not supported.'
+      )
+    },
   })
 
   const sendChatMessage = async () => {
     if (!chatInput.trim() || !selectedFile || isChatting) return
 
-    const userMessage: ChatMessage = {
-      id: Date.now().toString(),
-      content: chatInput,
-      role: 'user',
-      timestamp: new Date()
-    }
-
-    setChatMessages(prev => [...prev, userMessage])
+    const question = chatInput.trim()
+    setChatMessages(prev => [
+      ...prev,
+      { id: Date.now().toString(), content: question, role: 'user', timestamp: new Date() },
+    ])
     setChatInput('')
     setIsChatting(true)
 
@@ -235,43 +265,48 @@ export default function UploadPage() {
       const contextMessage = `Document: ${selectedFile.name}
 
 Extracted Text:
-${selectedFile.extractedText}
+${(selectedFile.extractedText || '').slice(0, CHAT_CONTEXT_CHARS)}
 
 Current Generated Requirements:
-${selectedFile.requirements?.map((req, idx) => 
-  `${idx + 1}. ${req.title} (${req.type}, ${req.priority}): ${req.description}`
-).join('\n') || 'None generated yet'}
+${
+  selectedFile.requirements
+    ?.map(
+      (req, idx) => `${idx + 1}. ${req.title} (${req.type}, ${req.priority}): ${req.description}`
+    )
+    .join('\n') || 'None generated yet'
+}
 
-User Request: ${chatInput}`
+User Request: ${question}`
 
       const response = await fetch('/api/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: contextMessage,
-          conversationHistory: chatMessages.slice(-3)
+          conversationHistory: chatMessages.filter(m => m.id !== 'intro').slice(-3),
+          projectId: selectedProjectId,
         }),
       })
 
-      if (!response.ok) {
-        throw new Error('Failed to send message')
+      const data = await response.json().catch(() => null)
+
+      if (response.status === 429) {
+        toast.error(data?.error || 'Usage limit reached')
+        return
       }
+      if (!response.ok) throw new Error(data?.error || 'Failed to send message')
 
-      const data = await response.json()
-
-      const assistantMessage: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        content: data.message,
-        role: 'assistant',
-        timestamp: new Date()
-      }
-
-      setChatMessages(prev => [...prev, assistantMessage])
-
+      setChatMessages(prev => [
+        ...prev,
+        {
+          id: `${Date.now()}-assistant`,
+          content: data.message,
+          role: 'assistant',
+          timestamp: new Date(),
+        },
+      ])
     } catch (error) {
-      toast.error('Failed to send message')
+      toast.error(error instanceof Error ? error.message : 'Failed to send message')
       console.error('Chat error:', error)
     } finally {
       setIsChatting(false)
@@ -279,27 +314,25 @@ User Request: ${chatInput}`
   }
 
   const formatFileSize = (bytes: number) => {
-    if (bytes === 0) return '0 Bytes'
-    const k = 1024
-    const sizes = ['Bytes', 'KB', 'MB', 'GB']
-    const i = Math.floor(Math.log(bytes) / Math.log(k))
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+    if (bytes === 0) return '0 bytes'
+    const units = ['bytes', 'KB', 'MB', 'GB']
+    const i = Math.floor(Math.log(bytes) / Math.log(1024))
+    return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(1))} ${units[i]}`
   }
 
-  const getStatusIcon = (status: UploadedFile['status']) => {
+  const statusIcon = (status: UploadedFile['status']) => {
     switch (status) {
       case 'uploading':
-        return <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
       case 'processing':
-        return <Loader2 className="h-5 w-5 animate-spin text-yellow-500" />
+        return <Loader2 className="h-4 w-4 animate-spin text-accent" />
       case 'completed':
-        return <CheckCircle className="h-5 w-5 text-green-500" />
+        return <CheckCircle2 className="h-4 w-4 text-positive" />
       case 'error':
-        return <XCircle className="h-5 w-5 text-red-500" />
+        return <AlertCircle className="h-4 w-4 text-critical" />
     }
   }
 
-  const deleteFile = (fileId: string) => {
+  const removeFile = (fileId: string) => {
     setFiles(prev => prev.filter(f => f.id !== fileId))
     if (selectedFile?.id === fileId) {
       setSelectedFile(null)
@@ -308,239 +341,270 @@ User Request: ${chatInput}`
   }
 
   return (
-    <div className="h-screen flex flex-col">
-      <div className="p-6 border-b border-gray-200 dark:border-gray-700">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Document Analysis</h1>
-        <p className="text-gray-600 dark:text-gray-300 mt-1">
-          Upload documents to extract text and generate requirements with AI assistance
-        </p>
-        
-        {/* Project Selector */}
-        <div className="mt-4 flex items-center space-x-3">
-          <FolderOpen className="h-5 w-5 text-gray-400" />
-          <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
-            Project:
-          </label>
-          {loadingProjects ? (
-            <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
-          ) : projects.length === 0 ? (
-            <div className="flex items-center space-x-2">
-              <span className="text-sm text-gray-500 dark:text-gray-400">
-                No projects found.
-              </span>
-              <a
-                href="/dashboard/projects/new"
-                className="text-sm text-blue-600 hover:text-blue-700 font-medium"
-              >
-                Create one
-              </a>
-            </div>
-          ) : (
-            <select
-              value={selectedProjectId}
-              onChange={(e) => setSelectedProjectId(e.target.value)}
-              className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="">Select a project</option>
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-          )}
+    <div className="flex h-[calc(100vh-3rem)] flex-col lg:h-screen">
+      {/* Header */}
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-6 py-3.5 lg:px-10">
+        <div>
+          <h1 className="text-sm font-semibold text-ink">Document analysis</h1>
+          <p className="text-[11px] text-ink-subtle">
+            Upload a document to extract requirements automatically
+          </p>
         </div>
-      </div>
 
-      <div className="flex-1 flex overflow-hidden">
-        <div className="w-1/2 p-6 border-r border-gray-200 dark:border-gray-700 overflow-y-auto">
-          <div className="mb-6">
-            <div
-              {...getRootProps()}
-              className={`relative border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors
-                ${isDragActive || dragActive
-                  ? 'border-blue-400 bg-blue-50 dark:bg-blue-900/20'
-                  : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
-                }`}
-            >
-              <input {...getInputProps()} />
-              <Upload className="mx-auto h-10 w-10 text-gray-400 mb-3" />
-              <div className="text-lg font-medium text-gray-900 dark:text-white mb-2">
-                Drop files here or click to upload
-              </div>
-              <div className="text-sm text-gray-500 dark:text-gray-400">
-                Supports PDF, Word documents, and text files (max 10MB)
-              </div>
-            </div>
+        {loadingProjects ? (
+          <Loader2 className="h-4 w-4 animate-spin text-ink-subtle" />
+        ) : projects.length === 0 ? (
+          <Link href="/dashboard/projects/new" className="text-[13px] font-medium text-accent hover:underline">
+            Create a project first →
+          </Link>
+        ) : (
+          <Select
+            value={selectedProjectId}
+            onChange={e => setSelectedProjectId(e.target.value)}
+            className="w-auto min-w-[11rem]"
+            aria-label="Project"
+          >
+            <option value="">Select a project</option>
+            {projects.map(project => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </Select>
+        )}
+      </header>
+
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        {/* Left: dropzone and file list */}
+        <div className="w-full overflow-y-auto border-line px-6 py-6 lg:w-[42%] lg:border-r lg:px-8">
+          <div
+            {...getRootProps()}
+            className={cn(
+              'rounded-card border border-dashed px-6 py-9 text-center transition-colors',
+              !selectedProjectId || outOfQuota
+                ? 'cursor-not-allowed border-line bg-surface-subtle opacity-60'
+                : isDragActive
+                  ? 'cursor-pointer border-accent bg-accent-soft'
+                  : 'cursor-pointer border-line-strong bg-surface hover:border-accent hover:bg-surface-hover'
+            )}
+          >
+            <input {...getInputProps()} />
+            <Upload className="mx-auto mb-3 h-7 w-7 text-ink-subtle" />
+            <p className="text-sm font-medium text-ink">
+              {outOfQuota
+                ? 'Upload allowance used'
+                : !selectedProjectId
+                  ? 'Select a project to upload'
+                  : 'Drop a file here, or click to browse'}
+            </p>
+            <p className="mt-1 text-[13px] text-ink-subtle">
+              PDF, Word or text · up to {MAX_MB}MB
+            </p>
           </div>
 
+          {usage && (
+            <p
+              className={cn(
+                'mt-2.5 text-right text-[11px]',
+                usage.uploadLifetimeRemaining === 0
+                  ? 'font-medium text-critical'
+                  : usage.uploadDailyRemaining === 0
+                    ? 'font-medium text-caution'
+                    : 'text-ink-subtle'
+              )}
+            >
+              {usage.uploadLifetimeRemaining === 0
+                ? 'Study upload allowance used'
+                : `${usage.uploadDailyRemaining} of ${usage.limits.dailyUpload} today · ${usage.uploadLifetimeRemaining} left in study`}
+            </p>
+          )}
+
           {files.length > 0 && (
-            <div>
-              <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-4">
-                Uploaded Files ({files.length})
-              </h3>
-              <div className="space-y-3">
-                {files.map((file) => (
-                  <div
+            <div className="mt-6">
+              <h2 className="mb-2.5 text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
+                Files ({files.length})
+              </h2>
+              <div className="space-y-2">
+                {files.map(file => (
+                  <Card
                     key={file.id}
-                    className={`p-4 rounded-lg border cursor-pointer transition-colors ${
-                      selectedFile?.id === file.id
-                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
-                        : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
-                    }`}
                     onClick={() => {
-                      if (file.status === 'completed') {
-                        setSelectedFile(file)
-                        if (chatMessages.length === 0) {
-                          setChatMessages([{
-                            id: '1',
-                            content: `I've analyzed "${file.name}". How can I help you refine the requirements?`,
+                      if (file.status !== 'completed') return
+                      setSelectedFile(file)
+                      if (chatMessages.length === 0) {
+                        setChatMessages([
+                          {
+                            id: 'intro',
+                            content: `Ask me anything about "${file.name}" or how to refine its requirements.`,
                             role: 'assistant',
-                            timestamp: new Date()
-                          }])
-                        }
+                            timestamp: new Date(),
+                          },
+                        ])
                       }
                     }}
+                    className={cn(
+                      'p-3 transition-colors',
+                      file.status === 'completed' && 'cursor-pointer hover:bg-surface-hover',
+                      selectedFile?.id === file.id && 'border-accent bg-accent-soft'
+                    )}
                   >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center">
-                        <File className="h-6 w-6 text-gray-400 mr-3" />
-                        <div>
-                          <div className="text-sm font-medium text-gray-900 dark:text-white">
-                            {file.name}
-                          </div>
-                          <div className="text-xs text-gray-500 dark:text-gray-400">
-                            {formatFileSize(file.size)}
-                          </div>
-                        </div>
+                    <div className="flex items-center gap-2.5">
+                      <FileIcon className="h-4 w-4 shrink-0 text-ink-subtle" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13px] font-medium text-ink">{file.name}</p>
+                        <p className="text-[11px] text-ink-subtle">{formatFileSize(file.size)}</p>
                       </div>
-                      <div className="flex items-center space-x-2">
-                        {getStatusIcon(file.status)}
-                        {file.status === 'completed' && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              deleteFile(file.id)
-                            }}
-                            className="p-1 text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        )}
-                      </div>
+                      {statusIcon(file.status)}
+                      <IconButton
+                        label="Remove from list"
+                        onClick={e => {
+                          e.stopPropagation()
+                          removeFile(file.id)
+                        }}
+                        className="h-7 w-7"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </IconButton>
                     </div>
 
                     {file.error && (
-                      <div className="mt-2 p-2 bg-red-50 dark:bg-red-900/20 rounded text-sm text-red-600 dark:text-red-400">
-                        Error: {file.error}
-                      </div>
+                      <p className="mt-2 rounded-lg bg-critical-soft px-2.5 py-1.5 text-[12px] text-critical">
+                        {file.error}
+                      </p>
                     )}
 
                     {file.requirements && file.requirements.length > 0 && (
-                      <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">
-                        Generated {file.requirements.length} requirements
+                      <div className="mt-2">
+                        <Badge tone="positive">
+                          {file.requirements.length} requirement
+                          {file.requirements.length !== 1 ? 's' : ''}
+                        </Badge>
                       </div>
                     )}
-                  </div>
+                  </Card>
                 ))}
               </div>
             </div>
           )}
         </div>
 
-        <div className="w-1/2 flex flex-col">
+        {/* Right: extracted text and refinement chat */}
+        <div className="flex min-h-0 w-full flex-1 flex-col">
           {selectedFile ? (
             <>
-              <div className="flex-1 p-6 border-b border-gray-200 dark:border-gray-700 overflow-y-auto">
-                <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
-                  Extracted Text - {selectedFile.name}
-                </h3>
-                <div className="bg-gray-50 dark:bg-gray-800 rounded p-4 text-sm text-gray-900 dark:text-white max-h-80 overflow-y-auto">
-                  <pre className="whitespace-pre-wrap font-mono">
+              <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6 lg:px-8">
+                <h2 className="mb-2.5 text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
+                  Extracted text
+                </h2>
+                <Card className="max-h-64 overflow-y-auto bg-surface-subtle p-4">
+                  <pre className="whitespace-pre-wrap font-mono text-[12px] leading-relaxed text-ink-muted">
                     {selectedFile.extractedText || 'No text extracted'}
                   </pre>
-                </div>
-                
+                </Card>
+
                 {selectedFile.requirements && selectedFile.requirements.length > 0 && (
-                  <div className="mt-4">
-                    <h4 className="text-md font-medium text-gray-900 dark:text-white mb-2">
-                      Generated Requirements ({selectedFile.requirements.length})
-                    </h4>
-                    <div className="space-y-2 max-h-40 overflow-y-auto">
+                  <>
+                    <h2 className="mb-2.5 mt-6 flex items-center justify-between text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
+                      Generated requirements ({selectedFile.requirements.length})
+                      <Link
+                        href={`/dashboard/requirements?projectId=${selectedProjectId}`}
+                        className="font-medium normal-case tracking-normal text-accent hover:underline"
+                      >
+                        Open in requirements →
+                      </Link>
+                    </h2>
+                    <div className="space-y-2">
                       {selectedFile.requirements.map((req: any, idx: number) => (
-                        <div key={idx} className="bg-white dark:bg-gray-700 rounded p-3 border border-gray-200 dark:border-gray-600">
-                          <div className="font-medium text-sm text-gray-900 dark:text-white">
-                            {req.title}
+                        <Card key={req.id ?? idx} className="p-3">
+                          <p className="text-[13px] font-medium text-ink">{req.title}</p>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                            <Badge>{(req.type ?? '').replace(/_/g, ' ').toLowerCase()}</Badge>
+                            <Badge>{(req.priority ?? '').toLowerCase()}</Badge>
+                            {typeof req.confidence === 'number' && (
+                              <span className="text-[11px] text-ink-subtle">
+                                {Math.round(req.confidence * 100)}% confidence
+                              </span>
+                            )}
                           </div>
-                          <div className="text-xs text-gray-600 dark:text-gray-300 mt-1">
-                            {req.type} • {req.priority} • {Math.round(req.confidence * 100)}% confidence
-                          </div>
-                        </div>
+                        </Card>
                       ))}
                     </div>
-                  </div>
+                  </>
                 )}
               </div>
 
-              <div className="flex-1 flex flex-col p-6">
-                <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
-                  Refine Requirements
-                </h3>
-                
-                <div className="flex-1 overflow-y-auto mb-4 space-y-3 max-h-64">
-                  {chatMessages.map((message) => (
-                    <div
-                      key={message.id}
-                      className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                    >
-                      <div
-                        className={`max-w-md px-3 py-2 rounded-lg text-sm ${
+              {/* Refinement chat */}
+              <div className="flex min-h-0 shrink-0 flex-col border-t border-line">
+                <div className="flex items-center gap-2 px-6 pt-4 lg:px-8">
+                  <Sparkles className="h-3.5 w-3.5 text-accent" />
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
+                    Refine with the assistant
+                  </h2>
+                </div>
+
+                <div
+                  ref={chatScrollRef}
+                  className="max-h-48 min-h-0 flex-1 space-y-3 overflow-y-auto px-6 py-3 lg:px-8"
+                >
+                  {chatMessages.map(message => (
+                    <div key={message.id} className="flex gap-2.5">
+                      <span
+                        className={cn(
+                          'mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[9px] font-semibold',
                           message.role === 'user'
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white'
-                        }`}
+                            ? 'bg-surface-subtle text-ink-muted'
+                            : 'bg-accent text-accent-fg'
+                        )}
+                        aria-hidden="true"
                       >
-                        <div className="whitespace-pre-wrap">{message.content}</div>
-                        <div className="text-xs opacity-70 mt-1">
-                          {message.timestamp.toLocaleTimeString()}
-                        </div>
-                      </div>
+                        {message.role === 'user' ? 'You' : <Sparkles className="h-2.5 w-2.5" />}
+                      </span>
+                      <p className="min-w-0 flex-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink">
+                        {message.content}
+                      </p>
                     </div>
                   ))}
                   {isChatting && (
-                    <div className="flex justify-start">
-                      <div className="bg-gray-100 dark:bg-gray-700 rounded-lg px-3 py-2">
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      </div>
+                    <div className="flex items-center gap-2 pl-7 text-[13px] text-ink-muted">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Thinking…
                     </div>
                   )}
                 </div>
 
-                <div className="flex space-x-2">
-                  <input
-                    type="text"
-                    value={chatInput}
-                    onChange={(e) => setChatInput(e.target.value)}
-                    onKeyPress={(e) => e.key === 'Enter' && sendChatMessage()}
-                    placeholder="Ask me to refine requirements, fix errors, or explain something..."
-                    className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm"
-                  />
-                  <button
-                    onClick={sendChatMessage}
-                    disabled={!chatInput.trim() || isChatting}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
-                  >
-                    <Send className="h-4 w-4" />
-                  </button>
+                <div className="px-6 pb-4 lg:px-8">
+                  <div className="flex items-center gap-2 rounded-xl border border-line-strong bg-surface p-1.5 focus-within:border-accent">
+                    <input
+                      type="text"
+                      value={chatInput}
+                      onChange={e => setChatInput(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && sendChatMessage()}
+                      placeholder="Ask about this document…"
+                      className="flex-1 bg-transparent px-2 text-[13px] text-ink outline-none placeholder:text-ink-subtle"
+                    />
+                    <Button
+                      variant="primary"
+                      onClick={sendChatMessage}
+                      disabled={!chatInput.trim()}
+                      loading={isChatting}
+                      className="h-7 w-7 shrink-0 rounded-lg px-0"
+                      aria-label="Send"
+                    >
+                      {!isChatting && <ArrowUp className="h-3.5 w-3.5" />}
+                    </Button>
+                  </div>
                 </div>
               </div>
             </>
           ) : (
-            <div className="flex-1 flex items-center justify-center text-gray-500 dark:text-gray-400">
-              <div className="text-center">
-                <File className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                <div className="text-lg font-medium">Select a processed document</div>
-                <div className="text-sm">Upload and process a document to see extracted text and chat with AI</div>
+            <div className="flex flex-1 items-center justify-center px-6 py-16">
+              <div className="max-w-xs text-center">
+                <FileIcon className="mx-auto mb-3 h-8 w-8 text-ink-subtle" />
+                <p className="text-sm font-medium text-ink">No document selected</p>
+                <p className="mt-1 text-[13px] leading-relaxed text-ink-muted">
+                  Upload a document, then select it to see the extracted text and refine its
+                  requirements.
+                </p>
               </div>
             </div>
           )}

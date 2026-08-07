@@ -1,9 +1,14 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { Send, Loader2, FileText, Sparkles, FolderOpen } from 'lucide-react'
+export const dynamic = 'force-dynamic'
+
+import { useState, useEffect, useRef } from 'react'
+import Link from 'next/link'
+import { Send, Loader2, FileText, ArrowUp, Sparkles } from 'lucide-react'
 import { toast } from 'react-hot-toast'
 import { useSearchParams } from 'next/navigation'
+import { Badge, Button, Select, cn } from '@/components/ui'
+import { MAX_CHAT_MESSAGE_CHARS } from '@/lib/limits'
 
 interface ChatMessage {
   id: string
@@ -19,67 +24,75 @@ interface Project {
   description: string | null
 }
 
+const SESSION_KEY = 'chat_session_state'
+
+const WELCOME =
+  "I'm here to help you gather software requirements. You can paste project notes, describe your project in plain language, or ask me to refine requirements you already have.\n\nPick a project above and tell me what you're building."
+
+const SUGGESTIONS = [
+  'I need a system for tracking employee leave requests',
+  'Help me turn these notes into structured requirements',
+  'What non-functional requirements am I missing?',
+]
+
 export default function ChatPage() {
   const searchParams = useSearchParams()
   const [projects, setProjects] = useState<Project[]>([])
-  const [selectedProjectId, setSelectedProjectId] = useState<string>('')
+  const [selectedProjectId, setSelectedProjectId] = useState('')
   const [loadingProjects, setLoadingProjects] = useState(true)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+  const [usage, setUsage] = useState<{
+    chatDailyRemaining: number
+    chatLifetimeRemaining: number
+    limits: { dailyChat: number; lifetimeChat: number }
+  } | null>(null)
 
-  // Session persistence key
-  const SESSION_KEY = 'chat_session_state'
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // Initialize welcome message after mount to avoid hydration mismatch
+  const fetchUsage = async () => {
+    try {
+      const res = await fetch('/api/usage')
+      if (res.ok) setUsage(await res.json())
+    } catch {
+      /* the meter is informational */
+    }
+  }
+
+  // Seed the welcome message after mount so the server and client markup match.
   useEffect(() => {
-    setMessages([{
-      id: '1',
-      content: "Hello! I'm your AI assistant for requirements gathering. You can:\n\n• Paste your project notes or requirements\n• Describe your project in natural language\n• Ask me to analyze text and extract requirements\n• Request help refining existing requirements\n\nPlease select a project to get started!",
-      role: 'assistant',
-      timestamp: new Date()
-    }])
+    setMessages([{ id: 'welcome', content: WELCOME, role: 'assistant', timestamp: new Date() }])
   }, [])
 
-  // Load projects on mount
   useEffect(() => {
     fetchProjects()
+    fetchUsage()
   }, [])
 
-  // Set project from URL params
   useEffect(() => {
     const projectIdFromUrl = searchParams.get('projectId')
-    if (projectIdFromUrl) {
-      setSelectedProjectId(projectIdFromUrl)
-    }
+    if (projectIdFromUrl) setSelectedProjectId(projectIdFromUrl)
   }, [searchParams])
 
-  // Load session state from localStorage on mount
+  // Restore the previous session, but only if it is less than an hour old.
   useEffect(() => {
     try {
       const savedState = localStorage.getItem(SESSION_KEY)
-      if (savedState) {
-        const parsed = JSON.parse(savedState)
-        
-        // Restore project selection
-        if (parsed.selectedProjectId && !searchParams.get('projectId')) {
-          setSelectedProjectId(parsed.selectedProjectId)
-        }
-        
-        // Restore chat messages if from same session (within last hour)
-        if (parsed.messages && parsed.timestamp && parsed.messages.length > 1) {
-          const savedTime = new Date(parsed.timestamp).getTime()
-          const currentTime = new Date().getTime()
-          const hourInMs = 60 * 60 * 1000
-          
-          if (currentTime - savedTime < hourInMs) {
-            // Restore messages with proper Date objects
-            const restoredMessages = parsed.messages.map((msg: any) => ({
-              ...msg,
-              timestamp: new Date(msg.timestamp)
-            }))
-            setMessages(restoredMessages)
-          }
+      if (!savedState) return
+      const parsed = JSON.parse(savedState)
+
+      if (parsed.selectedProjectId && !searchParams.get('projectId')) {
+        setSelectedProjectId(parsed.selectedProjectId)
+      }
+
+      if (parsed.messages?.length > 1 && parsed.timestamp) {
+        const age = Date.now() - new Date(parsed.timestamp).getTime()
+        if (age < 60 * 60 * 1000) {
+          setMessages(
+            parsed.messages.map((msg: any) => ({ ...msg, timestamp: new Date(msg.timestamp) }))
+          )
         }
       }
     } catch (error) {
@@ -87,19 +100,21 @@ export default function ChatPage() {
     }
   }, [searchParams])
 
-  // Save session state to localStorage whenever it changes
   useEffect(() => {
     try {
-      const stateToSave = {
-        selectedProjectId,
-        messages,
-        timestamp: new Date().toISOString()
-      }
-      localStorage.setItem(SESSION_KEY, JSON.stringify(stateToSave))
+      localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({ selectedProjectId, messages, timestamp: new Date().toISOString() })
+      )
     } catch (error) {
       console.error('Failed to save session state:', error)
     }
   }, [selectedProjectId, messages])
+
+  // Keep the newest message in view as the conversation grows.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+  }, [messages, isLoading])
 
   const fetchProjects = async () => {
     try {
@@ -107,9 +122,7 @@ export default function ChatPage() {
       if (response.ok) {
         const data = await response.json()
         setProjects(data.projects || [])
-        
-        // If no project selected and projects exist, select the first one
-        if (!selectedProjectId && data.projects.length > 0) {
+        if (!selectedProjectId && data.projects?.length > 0) {
           setSelectedProjectId(data.projects[0].id)
         }
       }
@@ -120,211 +133,265 @@ export default function ChatPage() {
     }
   }
 
-  const sendMessage = async () => {
-    if (!input.trim() || isLoading) return
+  /** Grow the composer with its content, up to a ceiling. */
+  const autoResize = () => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+  }
+
+  const sendMessage = async (override?: string) => {
+    const text = (override ?? input).trim()
+    if (!text || isLoading) return
 
     if (!selectedProjectId) {
-      toast.error('Please select a project first')
+      toast.error('Select a project first')
       return
     }
 
     const userMessage: ChatMessage = {
       id: Date.now().toString(),
-      content: input,
+      content: text,
       role: 'user',
-      timestamp: new Date()
+      timestamp: new Date(),
     }
 
     setMessages(prev => [...prev, userMessage])
     setInput('')
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'
     setIsLoading(true)
 
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: input,
-          conversationHistory: messages.slice(-5), // Send last 5 messages for context
-          projectId: selectedProjectId
+          message: text,
+          conversationHistory: messages.filter(m => m.id !== 'welcome').slice(-5),
+          projectId: selectedProjectId,
         }),
       })
 
-      if (!response.ok) {
-        throw new Error('Failed to send message')
+      const data = await response.json().catch(() => null)
+
+      if (response.status === 429) {
+        toast.error(data?.error || 'Usage limit reached')
+        fetchUsage()
+        return
       }
 
-      const data = await response.json()
+      if (!response.ok) throw new Error(data?.error || 'Failed to send message')
 
-      const assistantMessage: ChatMessage = {
-        id: (Date.now() + 1).toString(),
-        content: data.message,
-        role: 'assistant',
-        timestamp: new Date(),
-        requirements: data.requirements || []
-      }
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `${Date.now()}-assistant`,
+          content: data.message,
+          role: 'assistant',
+          timestamp: new Date(),
+          requirements: data.requirements || [],
+        },
+      ])
+      fetchUsage()
 
-      setMessages(prev => [...prev, assistantMessage])
-
-      // Show toast if requirements were generated
-      if (data.requirements && data.requirements.length > 0) {
-        toast.success(`Generated ${data.requirements.length} requirements!`)
+      if (data.requirements?.length > 0) {
+        toast.success(
+          `${data.requirements.length} requirement${data.requirements.length !== 1 ? 's' : ''} saved`
+        )
       }
     } catch (error) {
-      toast.error('Failed to send message')
+      toast.error(error instanceof Error ? error.message : 'Failed to send message')
       console.error('Chat error:', error)
     } finally {
       setIsLoading(false)
     }
   }
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
     }
   }
 
+  const outOfQuota = usage?.chatLifetimeRemaining === 0 || usage?.chatDailyRemaining === 0
+  const showSuggestions = messages.length <= 1 && !isLoading
+
   return (
-    <div className="h-screen flex flex-col bg-white dark:bg-gray-900">
+    <div className="flex h-[calc(100vh-3rem)] flex-col lg:h-screen">
       {/* Header */}
-      <div className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center">
-            <Sparkles className="h-6 w-6 text-blue-600 mr-3" />
-            <div>
-              <h1 className="text-xl font-semibold text-gray-900 dark:text-white">
-                AI Requirements Assistant
-              </h1>
-              <p className="text-sm text-gray-500 dark:text-gray-400">
-                Chat with AI to generate and refine software requirements
-              </p>
-            </div>
-          </div>
-          
-          {/* Project Selector */}
-          <div className="flex items-center space-x-3">
-            <FolderOpen className="h-5 w-5 text-gray-400" />
-            <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
-              Project:
-            </label>
-            {loadingProjects ? (
-              <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
-            ) : projects.length === 0 ? (
-              <div className="flex items-center space-x-2">
-                <span className="text-sm text-gray-500 dark:text-gray-400">
-                  No projects found.
-                </span>
-                <a
-                  href="/dashboard/projects/new"
-                  className="text-sm text-blue-600 hover:text-blue-700 font-medium"
-                >
-                  Create one
-                </a>
-              </div>
-            ) : (
-              <select
-                value={selectedProjectId}
-                onChange={(e) => setSelectedProjectId(e.target.value)}
-                className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="">Select a project</option>
-                {projects.map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-            )}
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-6 py-3.5 lg:px-10">
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
+            <Sparkles className="h-4 w-4" />
+          </span>
+          <div>
+            <h1 className="text-sm font-semibold text-ink">Requirements assistant</h1>
+            <p className="text-[11px] text-ink-subtle">
+              Requirements found in the conversation are saved to your project
+            </p>
           </div>
         </div>
-      </div>
+
+        {loadingProjects ? (
+          <Loader2 className="h-4 w-4 animate-spin text-ink-subtle" />
+        ) : projects.length === 0 ? (
+          <Link href="/dashboard/projects/new" className="text-[13px] font-medium text-accent hover:underline">
+            Create a project first →
+          </Link>
+        ) : (
+          <Select
+            value={selectedProjectId}
+            onChange={e => setSelectedProjectId(e.target.value)}
+            className="w-auto min-w-[11rem]"
+            aria-label="Project"
+          >
+            <option value="">Select a project</option>
+            {projects.map(project => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </Select>
+        )}
+      </header>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-6 space-y-4">
-        {messages.map((message) => (
-          <div
-            key={message.id}
-            className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
-            <div
-              className={`max-w-2xl rounded-lg px-4 py-3 ${
-                message.role === 'user'
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white'
-              }`}
-            >
-              <div className="whitespace-pre-wrap">{message.content}</div>
-              
-              {/* Requirements Preview */}
-              {message.requirements && message.requirements.length > 0 && (
-                <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-600">
-                  <div className="flex items-center text-sm font-medium mb-2">
-                    <FileText className="h-4 w-4 mr-1" />
-                    Generated Requirements ({message.requirements.length})
-                  </div>
-                  <div className="space-y-2">
-                    {message.requirements.map((req: any, idx: number) => (
-                      <div
-                        key={idx}
-                        className="bg-white dark:bg-gray-700 rounded p-2 text-xs"
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6 lg:px-10">
+        <div className="mx-auto max-w-3xl space-y-6">
+          {messages.map(message => (
+            <div key={message.id} className="flex gap-3.5">
+              <span
+                className={cn(
+                  'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold',
+                  message.role === 'user'
+                    ? 'bg-surface-subtle text-ink-muted'
+                    : 'bg-accent text-accent-fg'
+                )}
+                aria-hidden="true"
+              >
+                {message.role === 'user' ? 'You' : <Sparkles className="h-3.5 w-3.5" />}
+              </span>
+
+              <div className="min-w-0 flex-1">
+                <p className="whitespace-pre-wrap text-[14.5px] leading-relaxed text-ink">
+                  {message.content}
+                </p>
+
+                {message.requirements && message.requirements.length > 0 && (
+                  <div className="mt-3 rounded-xl border border-line bg-surface p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
+                        <FileText className="h-3 w-3" />
+                        {message.requirements.length} saved
+                      </span>
+                      <Link
+                        href={
+                          selectedProjectId
+                            ? `/dashboard/requirements?projectId=${selectedProjectId}`
+                            : '/dashboard/requirements'
+                        }
+                        className="text-[11px] font-medium text-accent hover:underline"
                       >
-                        <div className="font-medium">{req.title}</div>
-                        <div className="text-gray-600 dark:text-gray-300 mt-1">
-                          {req.type} • {req.priority}
-                        </div>
-                      </div>
-                    ))}
+                        View all →
+                      </Link>
+                    </div>
+                    <ul className="space-y-1.5">
+                      {message.requirements.map((req: any, idx: number) => (
+                        <li key={req.id ?? idx} className="flex items-start justify-between gap-2">
+                          <span className="min-w-0 flex-1 text-[13px] text-ink">{req.title}</span>
+                          <Badge>{(req.priority ?? '').toLowerCase()}</Badge>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
-                </div>
-              )}
-              
-              <div className={`text-xs mt-2 opacity-70`}>
-                {message.timestamp.toLocaleTimeString()}
+                )}
               </div>
             </div>
-          </div>
-        ))}
-        
-        {isLoading && (
-          <div className="flex justify-start">
-            <div className="bg-gray-100 dark:bg-gray-800 rounded-lg px-4 py-3">
-              <div className="flex items-center">
-                <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                <span className="text-gray-600 dark:text-gray-300">AI is thinking...</span>
-              </div>
+          ))}
+
+          {isLoading && (
+            <div className="flex gap-3.5">
+              <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent text-accent-fg">
+                <Sparkles className="h-3.5 w-3.5" />
+              </span>
+              <span className="flex items-center gap-2 pt-1 text-[14.5px] text-ink-muted">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Thinking…
+              </span>
             </div>
-          </div>
-        )}
+          )}
+
+          {showSuggestions && (
+            <div className="ml-[2.625rem] flex flex-wrap gap-2 pt-1">
+              {SUGGESTIONS.map(suggestion => (
+                <button
+                  key={suggestion}
+                  onClick={() => sendMessage(suggestion)}
+                  disabled={!selectedProjectId || outOfQuota}
+                  className="rounded-full border border-line bg-surface px-3 py-1.5 text-[13px] text-ink-muted transition-colors hover:border-line-strong hover:bg-surface-hover hover:text-ink disabled:opacity-50"
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Input */}
-      <div className="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 p-4">
-        <div className="flex space-x-4">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyPress={handleKeyPress}
-            placeholder="Describe your project, paste requirements, or ask for help..."
-            className="flex-1 min-h-[50px] max-h-[150px] resize-none rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 px-3 py-2 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-          />
-          <button
-            onClick={sendMessage}
-            disabled={!input.trim() || isLoading}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center"
-          >
-            {isLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4" />
+      {/* Composer */}
+      <div className="border-t border-line px-6 py-4 lg:px-10">
+        <div className="mx-auto max-w-3xl">
+          <div className="flex items-end gap-2 rounded-2xl border border-line-strong bg-surface p-2 transition-colors focus-within:border-accent">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={e => {
+                setInput(e.target.value)
+                autoResize()
+              }}
+              onKeyDown={handleKeyDown}
+              rows={1}
+              maxLength={MAX_CHAT_MESSAGE_CHARS}
+              disabled={outOfQuota}
+              placeholder={
+                outOfQuota
+                  ? 'You have used your chat allowance for the study'
+                  : 'Describe your project, paste notes, or ask for help…'
+              }
+              className="max-h-[200px] min-h-[2.25rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-[14.5px] leading-relaxed text-ink outline-none placeholder:text-ink-subtle disabled:cursor-not-allowed"
+            />
+            <Button
+              variant="primary"
+              onClick={() => sendMessage()}
+              disabled={!input.trim() || outOfQuota}
+              loading={isLoading}
+              className="h-8 w-8 shrink-0 rounded-xl px-0"
+              aria-label="Send message"
+            >
+              {!isLoading && <ArrowUp className="h-4 w-4" />}
+            </Button>
+          </div>
+
+          <div className="mt-2 flex items-center justify-between gap-3 px-1 text-[11px] text-ink-subtle">
+            <span>Enter to send · Shift+Enter for a new line</span>
+            {usage && (
+              <span
+                className={cn(
+                  usage.chatLifetimeRemaining === 0
+                    ? 'font-medium text-critical'
+                    : usage.chatDailyRemaining === 0
+                      ? 'font-medium text-caution'
+                      : undefined
+                )}
+              >
+                {usage.chatLifetimeRemaining === 0
+                  ? 'Study chat allowance used'
+                  : `${usage.chatDailyRemaining} of ${usage.limits.dailyChat} today · ${usage.chatLifetimeRemaining} left in study`}
+              </span>
             )}
-          </button>
-        </div>
-        
-        <div className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          Press Enter to send, Shift+Enter for new line
+          </div>
         </div>
       </div>
     </div>

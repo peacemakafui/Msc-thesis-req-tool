@@ -1,8 +1,11 @@
 'use client'
 
 import { useState } from 'react'
-import { FileText, Calendar, Trash2 } from 'lucide-react'
+import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import { Trash2, ArrowRight } from 'lucide-react'
+import { toast } from 'react-hot-toast'
+import { Button, Card, IconButton } from './ui'
 
 interface ProjectCardProps {
   project: {
@@ -20,106 +23,88 @@ interface ProjectCardProps {
 export default function ProjectCard({ project }: ProjectCardProps) {
   const router = useRouter()
   const [isDeleting, setIsDeleting] = useState(false)
-  const [showConfirm, setShowConfirm] = useState(false)
+  const [confirming, setConfirming] = useState(false)
 
   const handleDelete = async () => {
-    if (!showConfirm) {
-      setShowConfirm(true)
-      return
-    }
-
     setIsDeleting(true)
     try {
-      const response = await fetch(`/api/projects/${project.id}`, {
-        method: 'DELETE',
-      })
-
-      if (!response.ok) {
-        throw new Error('Failed to delete project')
-      }
-
-      // Refresh the page to show updated list
+      const response = await fetch(`/api/projects/${project.id}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error('Failed to delete project')
+      toast.success('Project deleted')
       router.refresh()
     } catch (error) {
       console.error('Error deleting project:', error)
-      alert('Failed to delete project. Please try again.')
+      toast.error('Failed to delete project. Please try again.')
     } finally {
       setIsDeleting(false)
-      setShowConfirm(false)
+      setConfirming(false)
     }
   }
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow hover:shadow-lg transition-shadow">
-      <div className="p-6">
-        <div className="flex items-start justify-between mb-4">
-          <div className="flex-1 min-w-0">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white truncate mb-1">
-              {project.name}
-            </h3>
-            {project.description && (
-              <p className="text-sm text-gray-600 dark:text-gray-300 line-clamp-2">
-                {project.description}
-              </p>
-            )}
-          </div>
-          <button
-            onClick={handleDelete}
-            disabled={isDeleting}
-            className={`ml-2 p-2 transition-colors ${
-              showConfirm
-                ? 'text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded'
-                : 'text-gray-400 hover:text-red-600 dark:hover:text-red-400'
-            } ${isDeleting ? 'opacity-50 cursor-not-allowed' : ''}`}
-            title={showConfirm ? 'Click again to confirm deletion' : 'Delete project'}
-          >
-            <Trash2 className="h-4 w-4" />
-          </button>
-        </div>
-
-        {showConfirm && (
-          <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
-            <p className="text-sm text-red-800 dark:text-red-200 font-medium">
-              Click the trash icon again to confirm deletion
-            </p>
-            <button
-              onClick={() => setShowConfirm(false)}
-              className="mt-2 text-xs text-red-600 dark:text-red-400 hover:underline"
-            >
-              Cancel
-            </button>
-          </div>
-        )}
-
-        <div className="flex items-center text-sm text-gray-500 dark:text-gray-400 mb-4">
-          <Calendar className="h-4 w-4 mr-1" />
-          {new Date(project.createdAt).toLocaleDateString()}
-        </div>
-
-        <div className="grid grid-cols-2 gap-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-          <div>
-            <p className="text-2xl font-bold text-gray-900 dark:text-white">
-              {project._count.documents}
-            </p>
-            <p className="text-xs text-gray-600 dark:text-gray-400">Documents</p>
-          </div>
-          <div>
-            <p className="text-2xl font-bold text-gray-900 dark:text-white">
-              {project._count.requirements}
-            </p>
-            <p className="text-xs text-gray-600 dark:text-gray-400">Requirements</p>
-          </div>
-        </div>
-
-        <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-          <a
-            href={`/dashboard/projects/${project.id}`}
-            className="block text-center px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
-          >
-            View Project
-          </a>
-        </div>
+    <Card className="group flex flex-col p-4 transition-colors hover:border-line-strong">
+      <div className="flex items-start justify-between gap-2">
+        <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-ink">{project.name}</h3>
+        <IconButton
+          label="Delete project"
+          variant="danger"
+          onClick={() => setConfirming(true)}
+          disabled={isDeleting}
+          className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </IconButton>
       </div>
-    </div>
+
+      <p className="mt-1.5 line-clamp-2 min-h-[2.5rem] text-[13px] leading-relaxed text-ink-muted">
+        {project.description || <span className="text-ink-subtle">No description</span>}
+      </p>
+
+      {confirming ? (
+        <div className="mt-3 rounded-lg border border-critical/30 bg-critical-soft p-3">
+          <p className="text-[13px] font-medium text-critical">
+            Delete this project and everything in it?
+          </p>
+          <div className="mt-2.5 flex gap-2">
+            <Button size="sm" variant="secondary" onClick={() => setConfirming(false)} disabled={isDeleting}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleDelete}
+              loading={isDeleting}
+              className="border-critical/40 bg-critical-soft text-critical hover:bg-critical-soft"
+            >
+              Delete
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <dl className="mt-3 flex gap-5 border-t border-line pt-3">
+            <div>
+              <dd className="text-lg font-semibold tabular-nums text-ink">
+                {project._count.documents}
+              </dd>
+              <dt className="text-[11px] text-ink-subtle">Documents</dt>
+            </div>
+            <div>
+              <dd className="text-lg font-semibold tabular-nums text-ink">
+                {project._count.requirements}
+              </dd>
+              <dt className="text-[11px] text-ink-subtle">Requirements</dt>
+            </div>
+          </dl>
+
+          <Link
+            href={`/dashboard/projects/${project.id}`}
+            className="mt-3 flex items-center justify-between rounded-lg bg-surface-subtle px-3 py-2 text-[13px] font-medium text-ink transition-colors hover:bg-surface-hover"
+          >
+            Open project
+            <ArrowRight className="h-3.5 w-3.5 text-ink-subtle" />
+          </Link>
+        </>
+      )}
+    </Card>
   )
 }

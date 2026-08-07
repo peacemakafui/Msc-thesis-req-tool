@@ -3,6 +3,25 @@ import { prisma } from '@/lib/prisma'
 import { requireAuth } from '@/lib/session'
 import { Document, Paragraph, TextRun, HeadingLevel, AlignmentType, BorderStyle, Table, TableRow, TableCell, WidthType } from 'docx'
 
+/** Rows included in a single export. This route makes no LLM calls, so the cap
+ * is about bounding response size and document-building memory, not token cost. */
+const MAX_EXPORT_REQUIREMENTS = 500
+
+const VALID_TYPES = new Set([
+  'FUNCTIONAL',
+  'NON_FUNCTIONAL',
+  'BUSINESS',
+  'USER_STORY',
+  'ACCEPTANCE_CRITERIA',
+])
+const VALID_PRIORITIES = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])
+const VALID_SOURCES = new Set([
+  'DOCUMENT_UPLOAD',
+  'CHAT_INPUT',
+  'MANUAL_INPUT',
+  'LLM_GENERATED',
+])
+
 export async function POST(request: NextRequest) {
   try {
     const user = await requireAuth()
@@ -19,21 +38,25 @@ export async function POST(request: NextRequest) {
       where.projectId = projectId
     }
 
+    // Only accept known enum values — anything else is dropped rather than
+    // passed through to the query.
     if (filters) {
-      if (filters.type && filters.type !== 'ALL') {
+      if (VALID_TYPES.has(filters.type)) {
         where.type = filters.type
       }
-      if (filters.priority && filters.priority !== 'ALL') {
+      if (VALID_PRIORITIES.has(filters.priority)) {
         where.priority = filters.priority
       }
-      if (filters.source && filters.source !== 'ALL') {
+      if (VALID_SOURCES.has(filters.source)) {
         where.source = filters.source
       }
     }
 
-    // Fetch requirements
+    // Fetch requirements. Capped so building a Word document cannot be turned
+    // into a memory-exhaustion vector.
     const requirements = await prisma.requirement.findMany({
       where,
+      take: MAX_EXPORT_REQUIREMENTS,
       include: {
         project: {
           select: {

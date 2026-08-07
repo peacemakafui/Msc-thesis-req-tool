@@ -7,7 +7,6 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
 }
 
 model User {
@@ -23,6 +22,27 @@ model User {
   organization String?
   experience   Int?       // Years of experience
   position     String?
+
+  // Trello integration credentials (legacy — export now uses server-side env vars)
+  trelloApiKey String?
+  trelloToken  String?
+
+  // Rate limiting: daily counts reset each UTC day; lifetime counts never reset.
+  // usageResetDate is always normalised to UTC midnight so it can be compared
+  // for equality in atomic conditional updates (see src/lib/rateLimit.ts).
+  dailyChatCount   Int       @default(0)
+  dailyUploadCount Int       @default(0)
+  dailyExportCount Int       @default(0)
+  usageResetDate   DateTime?
+  totalChatCount   Int       @default(0)
+  totalUploadCount Int       @default(0)
+  totalExportCount Int       @default(0)
+
+  // Backstop across every metered LLM operation, regardless of kind.
+  totalLlmCalls Int @default(0)
+
+  // Set true to cut a participant off without deleting their data.
+  blocked Boolean @default(false)
 
   // NextAuth fields
   emailVerified DateTime?
@@ -68,6 +88,17 @@ model VerificationToken {
   @@map("verification_tokens")
 }
 
+// Single-row table holding the deployment-wide daily LLM call count. This is the
+// backstop that caps total spend even if many accounts are created.
+model GlobalUsage {
+  id        String   @id @default("global")
+  day       String // UTC date, YYYY-MM-DD
+  llmCalls  Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@map("global_usage")
+}
+
 model Project {
   id          String   @id @default(cuid())
   name        String
@@ -77,6 +108,10 @@ model Project {
 
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Trello integration
+  trelloBoardId  String?
+  trelloBoardUrl String?
 
   // Project documents and requirements
   documents    Document[]
@@ -105,6 +140,9 @@ model Document {
   extractedText String?
   requirements  Requirement[]
 
+  // Number of LLM analysis runs against this document, to bound retries.
+  analysisAttempts Int @default(0)
+
   @@map("documents")
 }
 
@@ -117,6 +155,7 @@ model Requirement {
   status      ReqStatus   @default(DRAFT)
   source      ReqSource
   confidence  Float?      // LLM confidence score
+  sourceText  String?     // Supporting quote from the source document, for traceability
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 

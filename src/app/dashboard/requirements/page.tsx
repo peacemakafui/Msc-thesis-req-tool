@@ -1,77 +1,82 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
-import { FileText, Filter, Download, Edit, Trash2, Eye, FileCode } from 'lucide-react'
-import { toast } from 'react-hot-toast'
-import RequirementModal from '@/components/RequirementModal'
+export const dynamic = 'force-dynamic'
 
-interface Requirement {
+import { useState, useEffect, useRef, useMemo } from 'react'
+import { useSearchParams } from 'next/navigation'
+import { FileText, Download, Edit, Trash2, Eye, FileCode, ChevronDown } from 'lucide-react'
+import { toast } from 'react-hot-toast'
+import RequirementModal, { type RequirementDetail } from '@/components/RequirementModal'
+import TrelloExportModal from '@/components/TrelloExportModal'
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  IconButton,
+  PageHeader,
+  PRIORITY_TONES,
+  Select,
+  Skeleton,
+  TYPE_TONES,
+  humanize,
+} from '@/components/ui'
+
+interface Project {
   id: string
-  title: string
-  description: string
-  type: string
-  priority: string
-  source: string
-  confidence?: number
-  sourceText?: string
-  rationale?: string
-  createdAt: string
-  updatedAt?: string
-  project?: {
-    id: string
-    name: string
-  }
-  document?: {
-    id: string
-    originalName: string
-  }
+  name: string
 }
 
 export default function RequirementsPage() {
-  const [requirements, setRequirements] = useState<Requirement[]>([])
-  const [filteredRequirements, setFilteredRequirements] = useState<Requirement[]>([])
+  const searchParams = useSearchParams()
+  const [projects, setProjects] = useState<Project[]>([])
+  const [selectedProjectId, setSelectedProjectId] = useState('')
+  const [requirements, setRequirements] = useState<RequirementDetail[]>([])
   const [loading, setLoading] = useState(true)
-  const [selectedRequirement, setSelectedRequirement] = useState<Requirement | null>(null)
+  const [selectedRequirement, setSelectedRequirement] = useState<RequirementDetail | null>(null)
+  const [modalMode, setModalMode] = useState<'view' | 'edit'>('view')
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [generatingSRS, setGeneratingSRS] = useState(false)
-  const [exporting, setExporting] = useState(false)
   const [showExportMenu, setShowExportMenu] = useState(false)
+  const [showTrelloModal, setShowTrelloModal] = useState(false)
   const exportMenuRef = useRef<HTMLDivElement>(null)
-  const [filter, setFilter] = useState({
-    type: 'ALL',
-    priority: 'ALL',
-    source: 'ALL',
-    projectId: ''
-  })
+  const [filter, setFilter] = useState({ type: 'ALL', priority: 'ALL', source: 'ALL' })
 
   useEffect(() => {
-    fetchRequirements()
+    fetchProjects()
+    const pidFromUrl = searchParams.get('projectId') || ''
+    setSelectedProjectId(pidFromUrl)
+    fetchRequirements(pidFromUrl)
+    // Intentionally runs once: later project changes go through handleProjectChange.
   }, [])
 
-  useEffect(() => {
-    applyFilters()
-  }, [requirements, filter])
-
-  // Close export menu when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (exportMenuRef.current && !exportMenuRef.current.contains(event.target as Node)) {
         setShowExportMenu(false)
       }
     }
-
-    if (showExportMenu) {
-      document.addEventListener('mousedown', handleClickOutside)
-    }
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside)
-    }
+    if (showExportMenu) document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [showExportMenu])
 
-  const fetchRequirements = async () => {
+  const fetchProjects = async () => {
     try {
-      const response = await fetch('/api/requirements')
+      const response = await fetch('/api/projects')
+      if (response.ok) {
+        const data = await response.json()
+        setProjects(data.projects || [])
+      }
+    } catch (error) {
+      console.error('Failed to fetch projects:', error)
+    }
+  }
+
+  const fetchRequirements = async (projectId?: string) => {
+    try {
+      const pid = projectId ?? selectedProjectId
+      const url = pid ? `/api/requirements?projectId=${pid}` : '/api/requirements'
+      const response = await fetch(url)
       if (response.ok) {
         const data = await response.json()
         setRequirements(data.requirements || [])
@@ -83,124 +88,95 @@ export default function RequirementsPage() {
     }
   }
 
-  const applyFilters = () => {
-    let filtered = [...requirements]
-
-    if (filter.type !== 'ALL') {
-      filtered = filtered.filter(req => req.type === filter.type)
-    }
-    if (filter.priority !== 'ALL') {
-      filtered = filtered.filter(req => req.priority === filter.priority)
-    }
-    if (filter.source !== 'ALL') {
-      filtered = filtered.filter(req => req.source === filter.source)
-    }
-
-    setFilteredRequirements(filtered)
+  const handleProjectChange = (projectId: string) => {
+    setSelectedProjectId(projectId)
+    setLoading(true)
+    fetchRequirements(projectId)
   }
 
-  const getPriorityColor = (priority: string) => {
-    switch (priority) {
-      case 'CRITICAL': return 'text-red-600 bg-red-50 dark:bg-red-900/20'
-      case 'HIGH': return 'text-orange-600 bg-orange-50 dark:bg-orange-900/20'
-      case 'MEDIUM': return 'text-yellow-600 bg-yellow-50 dark:bg-yellow-900/20'
-      case 'LOW': return 'text-green-600 bg-green-50 dark:bg-green-900/20'
-      default: return 'text-gray-600 bg-gray-50 dark:bg-gray-800'
-    }
-  }
+  const filteredRequirements = useMemo(
+    () =>
+      requirements.filter(
+        req =>
+          (filter.type === 'ALL' || req.type === filter.type) &&
+          (filter.priority === 'ALL' || req.priority === filter.priority) &&
+          (filter.source === 'ALL' || req.source === filter.source)
+      ),
+    [requirements, filter]
+  )
 
-  const getTypeColor = (type: string) => {
-    switch (type) {
-      case 'FUNCTIONAL': return 'text-blue-600 bg-blue-50 dark:bg-blue-900/20'
-      case 'NON_FUNCTIONAL': return 'text-purple-600 bg-purple-50 dark:bg-purple-900/20'
-      case 'BUSINESS': return 'text-indigo-600 bg-indigo-50 dark:bg-indigo-900/20'
-      case 'USER_STORY': return 'text-teal-600 bg-teal-50 dark:bg-teal-900/20'
-      case 'ACCEPTANCE_CRITERIA': return 'text-pink-600 bg-pink-50 dark:bg-pink-900/20'
-      default: return 'text-gray-600 bg-gray-50 dark:bg-gray-800'
-    }
-  }
-
-  const handleEdit = (requirementId: string) => {
-    const req = requirements.find(r => r.id === requirementId)
-    if (req) {
-      setSelectedRequirement(req)
-      setIsModalOpen(true)
-    }
-  }
-
-  const handleViewDetails = (requirement: Requirement) => {
+  const openRequirement = (requirement: RequirementDetail, mode: 'view' | 'edit') => {
     setSelectedRequirement(requirement)
+    setModalMode(mode)
     setIsModalOpen(true)
   }
 
+  const closeModal = () => {
+    setIsModalOpen(false)
+    setSelectedRequirement(null)
+  }
+
   const handleDelete = async (requirementId: string) => {
-    if (!confirm('Are you sure you want to delete this requirement?')) return
+    if (!confirm('Delete this requirement? This cannot be undone.')) return
 
     try {
-      const response = await fetch(`/api/requirements/${requirementId}`, {
-        method: 'DELETE'
-      })
-
-      if (!response.ok) {
-        throw new Error('Failed to delete requirement')
-      }
-
-      // Refresh requirements list
+      const response = await fetch(`/api/requirements/${requirementId}`, { method: 'DELETE' })
+      if (!response.ok) throw new Error('Failed to delete requirement')
       await fetchRequirements()
-      toast.success('Requirement deleted successfully!')
-
+      toast.success('Requirement deleted')
     } catch (error) {
       toast.error('Failed to delete requirement')
       console.error('Delete error:', error)
     }
   }
 
-  const handleGenerateSRS = async () => {
-    if (requirements.length === 0) {
-      toast.error('No requirements to generate SRS from')
-      return
-    }
+  /** Trigger a client-side download from a blob. */
+  const download = (blob: Blob, filename: string) => {
+    const url = window.URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filename
+    document.body.appendChild(anchor)
+    anchor.click()
+    window.URL.revokeObjectURL(url)
+    document.body.removeChild(anchor)
+  }
 
-    // Get unique project ID from requirements (assuming all from same project for now)
-    const projectId = requirements[0]?.project?.id
-    
+  const handleGenerateSRS = async () => {
+    const projectId = selectedProjectId || requirements[0]?.project?.id
     if (!projectId) {
-      toast.error('Unable to determine project')
+      toast.error('Select a project first')
       return
     }
 
     setGeneratingSRS(true)
-    
     try {
       const response = await fetch('/api/generate-srs', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId }),
       })
 
-      if (!response.ok) {
-        throw new Error('Failed to generate SRS document')
+      const data = await response.json().catch(() => null)
+
+      // Quota responses carry a usable message — surface it rather than a generic error.
+      if (response.status === 429) {
+        toast.error(data?.error || 'Usage limit reached')
+        return
       }
+      if (!response.ok) throw new Error(data?.error || 'Failed to generate SRS document')
 
-      const data = await response.json()
-      
-      // Download as markdown file
-      const blob = new Blob([data.document], { type: 'text/markdown' })
-      const url = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${data.metadata.projectName.replace(/\s+/g, '_')}_SRS_${new Date().toISOString().split('T')[0]}.md`
-      document.body.appendChild(a)
-      a.click()
-      window.URL.revokeObjectURL(url)
-      document.body.removeChild(a)
-
-      toast.success('SRS document generated and downloaded!')
-
+      download(
+        new Blob([data.document], { type: 'text/markdown' }),
+        `${data.metadata.projectName.replace(/\s+/g, '_')}_SRS_${new Date().toISOString().split('T')[0]}.md`
+      )
+      toast.success(
+        data.metadata.truncated
+          ? `SRS generated from the top ${data.metadata.requirementsCount} requirements`
+          : 'SRS document generated'
+      )
     } catch (error) {
-      toast.error('Failed to generate SRS document')
+      toast.error(error instanceof Error ? error.message : 'Failed to generate SRS document')
       console.error('SRS generation error:', error)
     } finally {
       setGeneratingSRS(false)
@@ -208,307 +184,275 @@ export default function RequirementsPage() {
   }
 
   const handleExport = async (format: 'markdown' | 'word' | 'json') => {
-    if (requirements.length === 0) {
-      toast.error('No requirements to export')
-      return
-    }
-
-    setExporting(false)
     setShowExportMenu(false)
 
     try {
-      const projectId = requirements[0]?.project?.id
+      const projectId = selectedProjectId || requirements[0]?.project?.id
 
       const response = await fetch('/api/export-requirements', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          projectId,
-          format,
-          filters: filter
-        }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId, format, filters: filter }),
       })
 
-      if (!response.ok) {
-        throw new Error('Failed to export requirements')
-      }
+      if (!response.ok) throw new Error('Failed to export requirements')
 
       if (format === 'word') {
-        // Handle Word document binary response
-        const blob = await response.blob()
-        const url = window.URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
         const projectName = requirements[0]?.project?.name || 'Requirements'
-        a.download = `${projectName.replace(/\s+/g, '_')}_Requirements_${new Date().toISOString().split('T')[0]}.docx`
-        document.body.appendChild(a)
-        a.click()
-        window.URL.revokeObjectURL(url)
-        document.body.removeChild(a)
-        toast.success(`Exported ${requirements.length} requirements as Word document`)
+        download(
+          await response.blob(),
+          `${projectName.replace(/\s+/g, '_')}_Requirements_${new Date().toISOString().split('T')[0]}.docx`
+        )
+        toast.success('Exported as Word document')
       } else {
-        // Handle text-based formats
         const data = await response.json()
-        const blob = new Blob([data.content], { type: data.mimeType })
-        const url = window.URL.createObjectURL(blob)
-        const a = document.createElement('a')
-        a.href = url
-        a.download = data.filename
-        document.body.appendChild(a)
-        a.click()
-        window.URL.revokeObjectURL(url)
-        document.body.removeChild(a)
+        download(new Blob([data.content], { type: data.mimeType }), data.filename)
         toast.success(`Exported ${data.count} requirements as ${format.toUpperCase()}`)
       }
-
     } catch (error) {
       toast.error('Failed to export requirements')
       console.error('Export error:', error)
     }
   }
 
+  const hasRequirements = requirements.length > 0
+
   if (loading) {
     return (
-      <div className="p-8">
-        <div className="animate-pulse">
-          <div className="h-8 bg-gray-200 rounded w-1/4 mb-4"></div>
-          <div className="h-4 bg-gray-200 rounded w-1/2 mb-8"></div>
-          <div className="space-y-4">
-            {[1, 2, 3].map(i => (
-              <div key={i} className="h-24 bg-gray-200 rounded"></div>
-            ))}
-          </div>
+      <div className="mx-auto max-w-5xl px-6 py-8 lg:px-10">
+        <Skeleton className="h-7 w-48" />
+        <Skeleton className="mt-3 h-4 w-72" />
+        <Skeleton className="mt-8 h-16 w-full" />
+        <div className="mt-4 space-y-3">
+          {[1, 2, 3].map(i => (
+            <Skeleton key={i} className="h-28 w-full" />
+          ))}
         </div>
       </div>
     )
   }
 
   return (
-    <div className="p-8">
-      {/* Header */}
-      <div className="mb-8">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Requirements</h1>
-            <p className="text-gray-600 dark:text-gray-300 mt-1">
-              Manage and review your generated software requirements
-            </p>
-          </div>
-          <div className="flex space-x-3">
-            <button 
-              onClick={handleGenerateSRS}
-              disabled={generatingSRS || requirements.length === 0}
-              className="flex items-center px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed rounded-md transition-colors"
-            >
-              {generatingSRS ? (
-                <>
-                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  Generating...
-                </>
-              ) : (
-                <>
-                  <FileCode className="h-4 w-4 mr-2" />
-                  Generate SRS
-                </>
-              )}
-            </button>
+    <div className="mx-auto max-w-5xl px-6 py-8 lg:px-10">
+      <PageHeader
+        title="Requirements"
+        description="Review, edit and export the requirements generated for your projects."
+        actions={
+          <>
+            <Button onClick={handleGenerateSRS} disabled={!hasRequirements} loading={generatingSRS}>
+              {!generatingSRS && <FileCode className="h-3.5 w-3.5" />}
+              Generate SRS
+            </Button>
+
             <div className="relative" ref={exportMenuRef}>
-              <button 
-                onClick={() => setShowExportMenu(!showExportMenu)}
-                disabled={exporting || requirements.length === 0}
-                className="flex items-center px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Download className="h-4 w-4 mr-2" />
-                {exporting ? 'Exporting...' : 'Export'}
-              </button>
-              
+              <Button onClick={() => setShowExportMenu(v => !v)} disabled={!hasRequirements}>
+                <Download className="h-3.5 w-3.5" />
+                Export
+                <ChevronDown className="h-3 w-3 text-ink-subtle" />
+              </Button>
+
               {showExportMenu && (
-                <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 rounded-md shadow-lg border border-gray-200 dark:border-gray-700 z-10">
-                  <div className="py-1">
+                <div className="absolute right-0 z-20 mt-1.5 w-44 overflow-hidden rounded-xl border border-line bg-surface p-1 shadow-lg shadow-black/5">
+                  {(
+                    [
+                      ['markdown', 'Markdown (.md)'],
+                      ['word', 'Word (.docx)'],
+                      ['json', 'JSON (.json)'],
+                    ] as const
+                  ).map(([format, label]) => (
                     <button
-                      onClick={() => handleExport('markdown')}
-                      className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                      key={format}
+                      onClick={() => handleExport(format)}
+                      className="w-full rounded-lg px-2.5 py-1.5 text-left text-[13px] text-ink transition-colors hover:bg-surface-hover"
                     >
-                      📝 Markdown (.md)
+                      {label}
                     </button>
-                    <button
-                      onClick={() => handleExport('word')}
-                      className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-                    >
-                      � Word (.docx)
-                    </button>
-                    <button
-                      onClick={() => handleExport('json')}
-                      className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-                    >
-                      � JSON (.json)
-                    </button>
-                  </div>
+                  ))}
                 </div>
               )}
             </div>
-          </div>
-        </div>
-      </div>
+
+            <Button variant="primary" onClick={() => setShowTrelloModal(true)} disabled={!hasRequirements}>
+              <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current" aria-hidden="true">
+                <path d="M21 0H3C1.343 0 0 1.343 0 3v18c0 1.657 1.343 3 3 3h18c1.657 0 3-1.343 3-3V3c0-1.657-1.343-3-3-3zM10.44 18.18a1.56 1.56 0 0 1-1.56 1.56H4.56a1.56 1.56 0 0 1-1.56-1.56V4.56A1.56 1.56 0 0 1 4.56 3h4.32a1.56 1.56 0 0 1 1.56 1.56v12.62zm10.56-6a1.56 1.56 0 0 1-1.56 1.56h-4.32a1.56 1.56 0 0 1-1.56-1.56V4.56A1.56 1.56 0 0 1 15.12 3h4.32A1.56 1.56 0 0 1 21 4.56v7.62z" />
+              </svg>
+              Export to Trello
+            </Button>
+          </>
+        }
+      />
 
       {/* Filters */}
-      <div className="mb-6 bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-        <div className="flex items-center space-x-4">
-          <Filter className="h-5 w-5 text-gray-400" />
-          <div className="flex space-x-4">
-            <select
-              value={filter.type}
-              onChange={(e) => setFilter(prev => ({...prev, type: e.target.value}))}
-              className="text-sm border border-gray-300 dark:border-gray-600 rounded-md px-3 py-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-            >
-              <option value="ALL">All Types</option>
-              <option value="FUNCTIONAL">Functional</option>
-              <option value="NON_FUNCTIONAL">Non-Functional</option>
-              <option value="BUSINESS">Business</option>
-              <option value="USER_STORY">User Story</option>
-              <option value="ACCEPTANCE_CRITERIA">Acceptance Criteria</option>
-            </select>
+      <Card className="mb-5 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={selectedProjectId}
+            onChange={e => handleProjectChange(e.target.value)}
+            className="w-auto min-w-[10rem]"
+            aria-label="Filter by project"
+          >
+            <option value="">All projects</option>
+            {projects.map(project => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </Select>
 
-            <select
-              value={filter.priority}
-              onChange={(e) => setFilter(prev => ({...prev, priority: e.target.value}))}
-              className="text-sm border border-gray-300 dark:border-gray-600 rounded-md px-3 py-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <Select
+              value={filter.type}
+              onChange={e => setFilter(prev => ({ ...prev, type: e.target.value }))}
+              className="w-auto"
+              aria-label="Filter by type"
             >
-              <option value="ALL">All Priorities</option>
+              <option value="ALL">All types</option>
+              <option value="FUNCTIONAL">Functional</option>
+              <option value="NON_FUNCTIONAL">Non-functional</option>
+              <option value="BUSINESS">Business</option>
+              <option value="USER_STORY">User story</option>
+              <option value="ACCEPTANCE_CRITERIA">Acceptance criteria</option>
+            </Select>
+
+            <Select
+              value={filter.priority}
+              onChange={e => setFilter(prev => ({ ...prev, priority: e.target.value }))}
+              className="w-auto"
+              aria-label="Filter by priority"
+            >
+              <option value="ALL">All priorities</option>
               <option value="CRITICAL">Critical</option>
               <option value="HIGH">High</option>
               <option value="MEDIUM">Medium</option>
               <option value="LOW">Low</option>
-            </select>
+            </Select>
 
-            <select
+            <Select
               value={filter.source}
-              onChange={(e) => setFilter(prev => ({...prev, source: e.target.value}))}
-              className="text-sm border border-gray-300 dark:border-gray-600 rounded-md px-3 py-1 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+              onChange={e => setFilter(prev => ({ ...prev, source: e.target.value }))}
+              className="w-auto"
+              aria-label="Filter by source"
             >
-              <option value="ALL">All Sources</option>
-              <option value="DOCUMENT_UPLOAD">Document Upload</option>
-              <option value="CHAT_INPUT">Chat Input</option>
-              <option value="MANUAL_INPUT">Manual Input</option>
-              <option value="LLM_GENERATED">LLM Generated</option>
-            </select>
+              <option value="ALL">All sources</option>
+              <option value="DOCUMENT_UPLOAD">Document upload</option>
+              <option value="CHAT_INPUT">Chat input</option>
+              <option value="MANUAL_INPUT">Manual input</option>
+              <option value="LLM_GENERATED">LLM generated</option>
+            </Select>
           </div>
         </div>
-      </div>
+      </Card>
 
-      {/* Requirements List */}
+      {/* List */}
       {filteredRequirements.length === 0 ? (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
-          <FileText className="h-12 w-12 text-gray-400 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">
-            No requirements found
-          </h3>
-          <p className="text-gray-500 dark:text-gray-400 mb-6">
-            Upload documents or start a chat session to generate requirements.
-          </p>
-          <div className="flex justify-center space-x-4">
-            <a
-              href="/dashboard/upload"
-              className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-            >
-              Upload Document
-            </a>
-            <a
-              href="/dashboard/chat"
-              className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
-            >
-              Start Chat
-            </a>
-          </div>
-        </div>
+        <EmptyState
+          icon={<FileText className="h-5 w-5" />}
+          title={hasRequirements ? 'No requirements match these filters' : 'No requirements yet'}
+          description={
+            hasRequirements
+              ? 'Try clearing a filter to see more results.'
+              : 'Upload a document or start a chat session to generate requirements.'
+          }
+        >
+          {!hasRequirements && (
+            <>
+              <Button variant="primary" onClick={() => (window.location.href = '/dashboard/upload')}>
+                Upload document
+              </Button>
+              <Button onClick={() => (window.location.href = '/dashboard/chat')}>Start chat</Button>
+            </>
+          )}
+        </EmptyState>
       ) : (
-        <div className="space-y-4">
-          {filteredRequirements.map((requirement) => (
-            <div
+        <div className="space-y-2.5">
+          {filteredRequirements.map(requirement => (
+            <Card
               key={requirement.id}
-              className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-md transition-shadow"
+              className="group p-5 transition-colors hover:border-line-strong"
             >
-              <div className="flex items-start justify-between">
-                <div className="flex-1">
-                  <div className="flex items-center space-x-3 mb-3">
-                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                      {requirement.title}
-                    </h3>
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getTypeColor(requirement.type)}`}>
-                      {requirement.type.replace('_', ' ')}
-                    </span>
-                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${getPriorityColor(requirement.priority)}`}>
-                      {requirement.priority}
-                    </span>
+              <div className="flex items-start justify-between gap-4">
+                <button
+                  onClick={() => openRequirement(requirement, 'view')}
+                  className="min-w-0 flex-1 text-left"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-[15px] font-semibold text-ink">{requirement.title}</h3>
+                    <Badge tone={TYPE_TONES[requirement.type] ?? 'neutral'}>
+                      {humanize(requirement.type)}
+                    </Badge>
+                    <Badge tone={PRIORITY_TONES[requirement.priority] ?? 'neutral'}>
+                      {requirement.priority.toLowerCase()}
+                    </Badge>
                   </div>
-                  
-                  <p className="text-gray-600 dark:text-gray-300 mb-4 leading-relaxed">
+
+                  <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-ink-muted">
                     {requirement.description}
                   </p>
-                  
-                  <div className="flex items-center text-sm text-gray-500 dark:text-gray-400 space-x-4">
-                    <span>Source: {requirement.source.replace('_', ' ')}</span>
-                    {requirement.confidence && (
-                      <span>Confidence: {Math.round(requirement.confidence * 100)}%</span>
+
+                  <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-subtle">
+                    <span>{humanize(requirement.source)}</span>
+                    {requirement.confidence != null && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span>{Math.round(requirement.confidence * 100)}% confidence</span>
+                      </>
                     )}
+                    <span aria-hidden="true">·</span>
                     <span>{new Date(requirement.createdAt).toLocaleDateString()}</span>
                   </div>
-                </div>
-                
-                <div className="flex space-x-2 ml-4">
-                  <button 
-                    onClick={() => handleViewDetails(requirement)}
-                    className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-md transition-colors"
-                    title="View Details"
+                </button>
+
+                <div className="flex shrink-0 items-center gap-0.5 opacity-60 transition-opacity group-hover:opacity-100">
+                  <IconButton
+                    label="View details"
+                    onClick={() => openRequirement(requirement, 'view')}
                   >
                     <Eye className="h-4 w-4" />
-                  </button>
-                  <button 
-                    onClick={() => handleEdit(requirement.id)}
-                    className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-md transition-colors"
-                    title="Edit"
-                  >
+                  </IconButton>
+                  <IconButton label="Edit" onClick={() => openRequirement(requirement, 'edit')}>
                     <Edit className="h-4 w-4" />
-                  </button>
-                  <button 
+                  </IconButton>
+                  <IconButton
+                    label="Delete"
+                    variant="danger"
                     onClick={() => handleDelete(requirement.id)}
-                    className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md transition-colors"
-                    title="Delete"
                   >
                     <Trash2 className="h-4 w-4" />
-                  </button>
+                  </IconButton>
                 </div>
               </div>
-            </div>
+            </Card>
           ))}
         </div>
       )}
 
-      {/* Results Summary */}
       {filteredRequirements.length > 0 && (
-        <div className="mt-6 text-sm text-gray-500 dark:text-gray-400 text-center">
+        <p className="mt-5 text-center text-xs text-ink-subtle">
           Showing {filteredRequirements.length} of {requirements.length} requirements
-        </div>
+        </p>
       )}
 
-      {/* Requirement Detail Modal */}
       <RequirementModal
         requirement={selectedRequirement}
         isOpen={isModalOpen}
-        onClose={() => {
-          setIsModalOpen(false)
-          setSelectedRequirement(null)
-        }}
+        initialMode={modalMode}
+        onClose={closeModal}
         onUpdate={() => {
           fetchRequirements()
-          setIsModalOpen(false)
-          setSelectedRequirement(null)
+          closeModal()
         }}
+      />
+
+      <TrelloExportModal
+        isOpen={showTrelloModal}
+        onClose={() => setShowTrelloModal(false)}
+        projectId={selectedProjectId || (requirements[0]?.project?.id ?? '')}
+        projectName={
+          projects.find(p => p.id === selectedProjectId)?.name ??
+          requirements[0]?.project?.name ??
+          'Project'
+        }
+        requirementsCount={filteredRequirements.length}
       />
     </div>
   )

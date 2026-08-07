@@ -4,11 +4,11 @@ import { requireAuth } from '@/lib/session'
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const user = await requireAuth()
-    const { id } = params
+    const { id } = await params
 
     // Verify ownership
     const project = await prisma.project.findUnique({

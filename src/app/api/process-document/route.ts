@@ -2,123 +2,136 @@ import { NextRequest, NextResponse } from 'next/server'
 import { analyzeDocument } from '@/lib/llm'
 import { prisma } from '@/lib/prisma'
 import { requireAuth } from '@/lib/session'
+import { consumeLlmCall } from '@/lib/rateLimit'
+import { apiError, PublicError } from '@/lib/apiError'
+import { MAX_DOCUMENT_TEXT_CHARS } from '@/lib/limits'
+import { extractRequirements } from '@/lib/parseRequirements'
+
+/** Ceiling on LLM analysis runs per document, so a failing document cannot be retried forever. */
+const MAX_ANALYSIS_ATTEMPTS = 3
 
 export async function POST(request: NextRequest) {
   let documentId: string | undefined
-  
+
   try {
-    // Get authenticated user
     const user = await requireAuth()
-    
+
     const body = await request.json()
-    documentId = body.documentId
+    documentId = typeof body?.documentId === 'string' ? body.documentId : undefined
 
     if (!documentId) {
-      return NextResponse.json(
-        { success: false, error: 'Document ID is required' },
-        { status: 400 }
-      )
+      throw new PublicError('Document ID is required')
     }
 
-    // Get document from database and verify ownership
     const document = await prisma.document.findUnique({
       where: { id: documentId },
-      include: { 
-        project: {
-          select: {
-            id: true,
-            userId: true
-          }
-        }
-      }
+      include: {
+        project: { select: { id: true, userId: true } },
+        _count: { select: { requirements: true } },
+      },
     })
 
     if (!document) {
-      return NextResponse.json(
-        { success: false, error: 'Document not found' },
-        { status: 404 }
-      )
+      throw new PublicError('Document not found', 404)
     }
 
-    // Verify user owns this document
     if (document.project.userId !== user.id) {
-      return NextResponse.json(
-        { success: false, error: 'Unauthorized' },
-        { status: 403 }
+      throw new PublicError('Unauthorized', 403)
+    }
+
+    // Already analysed: return what was stored instead of paying for the same
+    // work twice. This also makes the upload page's retry behaviour free.
+    if (document._count.requirements > 0) {
+      const existing = await prisma.requirement.findMany({
+        where: { documentId: document.id },
+        select: {
+          id: true,
+          title: true,
+          description: true,
+          type: true,
+          priority: true,
+          confidence: true,
+          llmModel: true,
+        },
+      })
+      return NextResponse.json({ success: true, requirements: existing, cached: true })
+    }
+
+    if (document.analysisAttempts >= MAX_ANALYSIS_ATTEMPTS) {
+      throw new PublicError(
+        'This document could not be analysed after several attempts. Please upload a different file.',
+        409
       )
     }
 
-    if (!document.extractedText) {
-      return NextResponse.json(
-        { success: false, error: 'No text content available for processing' },
-        { status: 400 }
-      )
+    if (!document.extractedText?.trim()) {
+      throw new PublicError('No text content available for processing')
     }
 
-    // Analyze document with LLM (with automatic fallback)
+    // The document quota was charged at upload time. This still enforces the
+    // kill switch, the per-user ceiling and the deployment-wide daily ceiling.
+    await consumeLlmCall(user.id)
+
+    // Count the attempt before the call, so a crash mid-request still counts.
+    await prisma.document.update({
+      where: { id: documentId },
+      data: { analysisAttempts: { increment: 1 } },
+    })
+
     const startTime = Date.now()
     const { result: llmResponse, model: usedModel } = await analyzeDocument(
-      document.extractedText,
-      'gpt' // Start with GPT
+      // llm.ts truncates too; doing it here keeps the cap visible at the call site.
+      document.extractedText.slice(0, MAX_DOCUMENT_TEXT_CHARS),
+      'gemini'
     )
     const responseTime = Date.now() - startTime
-
-    console.log(`Used model: ${usedModel}, Response time: ${responseTime}ms`)
 
     if (!llmResponse) {
       throw new Error('No response from LLM')
     }
 
-    // Parse requirements from LLM response
-    let requirements: any[] = []
-    try {
-      // Try to extract JSON from the response
-      const jsonMatch = llmResponse.match(/```json\n([\s\S]*?)\n```/) || 
-                       llmResponse.match(/\[[\s\S]*\]/)
-      
-      if (jsonMatch) {
-        const jsonStr = jsonMatch[1] || jsonMatch[0]
-        requirements = JSON.parse(jsonStr)
-      } else {
-        throw new Error('No valid JSON found in response')
-      }
-    } catch (parseError) {
-      console.error('Failed to parse requirements:', parseError)
-      
-      // Fallback: create a single requirement with the full response
-      requirements = [{
-        title: 'Extracted Requirements',
-        description: llmResponse,
-        type: 'BUSINESS',
-        priority: 'MEDIUM',
-        confidence: 0.7
-      }]
+    // Recovers whatever the model completed, even if it stopped mid-array.
+    const { requirements, truncated } = extractRequirements(llmResponse)
+
+    if (truncated) {
+      console.warn(
+        `Model output was truncated for document ${documentId}; salvaged ${requirements.length} requirements`
+      )
     }
 
-    // Save requirements to database
+    // Storing the raw response as a placeholder requirement (the old fallback)
+    // produced unusable rows that then flowed into SRS and Trello exports.
+    // Failing outright is more honest, and the attempt counter bounds retries.
+    if (requirements.length === 0) {
+      console.error(
+        'No requirements could be parsed from model response:',
+        llmResponse.slice(0, 500)
+      )
+      throw new PublicError(
+        'The document could not be analysed into structured requirements. It may not contain enough detail — try a more descriptive document.',
+        422
+      )
+    }
+
     const savedRequirements = []
     for (const req of requirements) {
       try {
         const requirement = await prisma.requirement.create({
           data: {
-            title: req.title || 'Untitled Requirement',
-            description: req.description || '',
-            type: req.type || 'FUNCTIONAL',
-            priority: req.priority || 'MEDIUM',
+            ...req,
             source: 'DOCUMENT_UPLOAD',
-            confidence: req.confidence || null,
-            llmModel: 'gemini-2.0-flash-exp',
+            llmModel: usedModel,
             projectId: document.projectId,
             documentId: document.id,
             processing: {
               create: {
                 processingType: 'LLM_ANALYSIS',
-                model: 'gemini-2.0-flash-exp',
+                model: usedModel,
                 responseTime,
-                success: true
-              }
-            }
-          }
+                success: true,
+              },
+            },
+          },
         })
         savedRequirements.push(requirement)
       } catch (reqError) {
@@ -126,13 +139,9 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Update document status
     await prisma.document.update({
       where: { id: documentId },
-      data: {
-        status: 'PROCESSED',
-        processedAt: new Date()
-      }
+      data: { status: 'PROCESSED', processedAt: new Date() },
     })
 
     return NextResponse.json({
@@ -143,36 +152,25 @@ export async function POST(request: NextRequest) {
         description: req.description,
         type: req.type,
         priority: req.priority,
-        confidence: req.confidence
+        confidence: req.confidence,
       })),
-      model: 'gemini-2.0-flash-exp',
-      responseTime
+      model: usedModel,
+      responseTime,
     })
-
   } catch (error) {
-    console.error('Document processing error:', error)
-    
-    // Update document status to error if we have a documentId
-    try {
-      const { documentId } = await request.json()
-      if (documentId) {
+    // Mark the document as errored, but only for genuine processing failures —
+    // a validation rejection leaves the document usable.
+    if (documentId && !(error instanceof PublicError)) {
+      try {
         await prisma.document.update({
           where: { id: documentId },
-          data: {
-            status: 'ERROR'
-          }
+          data: { status: 'ERROR' },
         })
+      } catch (updateError) {
+        console.error('Failed to update document status:', updateError)
       }
-    } catch (updateError) {
-      console.error('Failed to update document status:', updateError)
     }
 
-    return NextResponse.json(
-      { 
-        success: false, 
-        error: error instanceof Error ? error.message : 'Internal server error' 
-      },
-      { status: 500 }
-    )
+    return apiError('Document processing error', error)
   }
 }

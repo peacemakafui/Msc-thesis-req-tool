@@ -5,23 +5,33 @@ import { useRouter } from 'next/navigation'
 import { signIn } from 'next-auth/react'
 import Link from 'next/link'
 import { toast } from 'react-hot-toast'
-import { Loader2 } from 'lucide-react'
+import { KeyRound, Sparkles } from 'lucide-react'
+import { Button, Card, Field, Input } from '@/components/ui'
 
 export default function SignupPage() {
   const router = useRouter()
   const [isLoading, setIsLoading] = useState(false)
   const [formData, setFormData] = useState({
+    accessCode: '',
     email: '',
     password: '',
     confirmPassword: '',
     name: '',
     organization: '',
     position: '',
-    experience: ''
+    experience: '',
   })
+
+  const set = (key: keyof typeof formData) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    setFormData(prev => ({ ...prev, [key]: e.target.value }))
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+
+    if (!formData.accessCode.trim()) {
+      toast.error('An access code is required to join the study')
+      return
+    }
 
     if (formData.password !== formData.confirmPassword) {
       toast.error('Passwords do not match')
@@ -38,41 +48,37 @@ export default function SignupPage() {
     try {
       const response = await fetch('/api/auth/signup', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          accessCode: formData.accessCode.trim(),
           email: formData.email,
           password: formData.password,
           name: formData.name,
           organization: formData.organization,
           position: formData.position,
-          experience: formData.experience
+          experience: formData.experience,
         }),
       })
 
-      const data = await response.json()
+      const data = await response.json().catch(() => null)
 
       if (!response.ok) {
-        throw new Error(data.error || 'Something went wrong')
+        throw new Error(data?.error || 'Something went wrong')
       }
 
-      toast.success('Account created successfully!')
-      
-      // Automatically sign in after signup
       const signInResult = await signIn('credentials', {
         email: formData.email,
         password: formData.password,
-        redirect: false
+        redirect: false,
       })
 
       if (signInResult?.error) {
+        toast.success('Account created — please sign in')
         router.push('/login')
       } else {
         router.push('/dashboard')
         router.refresh()
       }
-
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Something went wrong')
     } finally {
@@ -81,162 +87,138 @@ export default function SignupPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-md w-full space-y-8">
-        <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900 dark:text-white">
-            Create your account
-          </h2>
-          <p className="mt-2 text-center text-sm text-gray-600 dark:text-gray-400">
-            Join the requirements gathering research
+    <div className="flex min-h-screen items-center justify-center px-4 py-12">
+      <div className="w-full max-w-md">
+        <div className="mb-7 text-center">
+          <span className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-xl bg-accent text-accent-fg">
+            <Sparkles className="h-5 w-5" />
+          </span>
+          <h1 className="text-xl font-semibold text-ink">Join the study</h1>
+          <p className="mt-1.5 text-[13px] text-ink-muted">
+            Create an account to take part in the requirements gathering research
           </p>
         </div>
-        <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-          <div className="space-y-4">
-            <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Email address *
-              </label>
-              <input
-                id="email"
-                name="email"
-                type="email"
-                autoComplete="email"
-                required
-                value={formData.email}
-                onChange={(e) => setFormData({ ...formData, email: e.target.value })}
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 placeholder-gray-500 dark:placeholder-gray-400 text-gray-900 dark:text-white bg-white dark:bg-gray-800 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                placeholder="you@example.com"
-                disabled={isLoading}
-              />
+
+        <Card className="p-6">
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            {/* Access code first — it is the gate, so it shouldn't be a surprise
+                at the end of a long form. */}
+            <Field label="Access code" required hint="Provided by the researcher">
+              <div className="relative">
+                <KeyRound className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-subtle" />
+                <Input
+                  id="accessCode"
+                  value={formData.accessCode}
+                  onChange={set('accessCode')}
+                  required
+                  autoComplete="off"
+                  placeholder="Enter your code"
+                  disabled={isLoading}
+                  className="pl-9"
+                />
+              </div>
+            </Field>
+
+            <div className="border-t border-line pt-4">
+              <Field label="Email" required>
+                <Input
+                  id="email"
+                  type="email"
+                  autoComplete="email"
+                  required
+                  value={formData.email}
+                  onChange={set('email')}
+                  placeholder="you@example.com"
+                  disabled={isLoading}
+                />
+              </Field>
             </div>
 
-            <div>
-              <label htmlFor="name" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Full Name
-              </label>
-              <input
+            <Field label="Full name">
+              <Input
                 id="name"
-                name="name"
-                type="text"
                 value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 placeholder-gray-500 dark:placeholder-gray-400 text-gray-900 dark:text-white bg-white dark:bg-gray-800 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                placeholder="John Doe"
+                onChange={set('name')}
+                placeholder="Ada Lovelace"
                 disabled={isLoading}
               />
+            </Field>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Organization">
+                <Input
+                  id="organization"
+                  value={formData.organization}
+                  onChange={set('organization')}
+                  placeholder="Your company"
+                  disabled={isLoading}
+                />
+              </Field>
+
+              <Field label="Position">
+                <Input
+                  id="position"
+                  value={formData.position}
+                  onChange={set('position')}
+                  placeholder="Software developer"
+                  disabled={isLoading}
+                />
+              </Field>
             </div>
 
-            <div>
-              <label htmlFor="organization" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Organization
-              </label>
-              <input
-                id="organization"
-                name="organization"
-                type="text"
-                value={formData.organization}
-                onChange={(e) => setFormData({ ...formData, organization: e.target.value })}
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 placeholder-gray-500 dark:placeholder-gray-400 text-gray-900 dark:text-white bg-white dark:bg-gray-800 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                placeholder="Your company"
-                disabled={isLoading}
-              />
-            </div>
-
-            <div>
-              <label htmlFor="position" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Position
-              </label>
-              <input
-                id="position"
-                name="position"
-                type="text"
-                value={formData.position}
-                onChange={(e) => setFormData({ ...formData, position: e.target.value })}
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 placeholder-gray-500 dark:placeholder-gray-400 text-gray-900 dark:text-white bg-white dark:bg-gray-800 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                placeholder="Software Developer"
-                disabled={isLoading}
-              />
-            </div>
-
-            <div>
-              <label htmlFor="experience" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Years of Experience
-              </label>
-              <input
+            <Field label="Years of experience">
+              <Input
                 id="experience"
-                name="experience"
                 type="number"
                 min="0"
+                max="80"
                 value={formData.experience}
-                onChange={(e) => setFormData({ ...formData, experience: e.target.value })}
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 placeholder-gray-500 dark:placeholder-gray-400 text-gray-900 dark:text-white bg-white dark:bg-gray-800 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                onChange={set('experience')}
                 placeholder="5"
                 disabled={isLoading}
               />
+            </Field>
+
+            <div className="grid gap-4 border-t border-line pt-4 sm:grid-cols-2">
+              <Field label="Password" required hint="At least 8 characters">
+                <Input
+                  id="password"
+                  type="password"
+                  autoComplete="new-password"
+                  required
+                  value={formData.password}
+                  onChange={set('password')}
+                  placeholder="••••••••"
+                  disabled={isLoading}
+                />
+              </Field>
+
+              <Field label="Confirm password" required>
+                <Input
+                  id="confirmPassword"
+                  type="password"
+                  autoComplete="new-password"
+                  required
+                  value={formData.confirmPassword}
+                  onChange={set('confirmPassword')}
+                  placeholder="••••••••"
+                  disabled={isLoading}
+                />
+              </Field>
             </div>
 
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Password *
-              </label>
-              <input
-                id="password"
-                name="password"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={formData.password}
-                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 placeholder-gray-500 dark:placeholder-gray-400 text-gray-900 dark:text-white bg-white dark:bg-gray-800 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                placeholder="••••••••"
-                disabled={isLoading}
-              />
-              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">At least 8 characters</p>
-            </div>
+            <Button type="submit" variant="primary" size="lg" loading={isLoading} className="w-full">
+              Create account
+            </Button>
 
-            <div>
-              <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                Confirm Password *
-              </label>
-              <input
-                id="confirmPassword"
-                name="confirmPassword"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={formData.confirmPassword}
-                onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
-                className="mt-1 appearance-none relative block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 placeholder-gray-500 dark:placeholder-gray-400 text-gray-900 dark:text-white bg-white dark:bg-gray-800 rounded-md focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                placeholder="••••••••"
-                disabled={isLoading}
-              />
-            </div>
-          </div>
-
-          <div>
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isLoading ? (
-                <Loader2 className="h-5 w-5 animate-spin" />
-              ) : (
-                'Create account'
-              )}
-            </button>
-          </div>
-
-          <div className="text-center">
-            <p className="text-sm text-gray-600 dark:text-gray-400">
+            <p className="text-center text-[13px] text-ink-muted">
               Already have an account?{' '}
-              <Link href="/login" className="font-medium text-blue-600 hover:text-blue-500">
+              <Link href="/login" className="font-medium text-accent hover:underline">
                 Sign in
               </Link>
             </p>
-          </div>
-        </form>
+          </form>
+        </Card>
       </div>
     </div>
   )
