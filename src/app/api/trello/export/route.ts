@@ -93,7 +93,8 @@ export async function POST(request: NextRequest) {
         title: r.title,
         description: r.description,
         type: r.type,
-      }))
+      })),
+      { userId: user.id }
     )
 
     // ── Step 5: Create cards in "To Do" list ────────────────────────────────

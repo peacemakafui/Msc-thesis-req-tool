@@ -18,6 +18,7 @@
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
+    "db:make-admin": "tsx prisma/makeAdmin.ts",
     "test": "jest",
     "test:watch": "jest --watch"
   },

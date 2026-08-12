@@ -10,6 +10,14 @@ import {
   MAX_SUBTASK_REQUIREMENTS,
   truncate,
 } from './limits'
+import {
+  recordLlmUsage,
+  type Provider,
+  type UsageContext,
+  type UsageKind,
+} from './tokenUsage'
+
+export type { UsageContext } from './tokenUsage'
 
 /**
  * Provider clients are created lazily, not at module scope.
@@ -62,6 +70,88 @@ const CLAUDE_MODEL = 'claude-3-5-haiku-20241022'
  * Quotas in rateLimit.ts bound how many calls a participant can make; these caps
  * bound what any single call can cost.
  */
+
+// ── Metering ──────────────────────────────────────────────────────────────────
+
+/**
+ * Run one provider request, recording the tokens it reported either way.
+ *
+ * Every provider request in this module goes through here, which is why each
+ * exported function takes a `UsageContext`: a call that isn't attributable to a
+ * participant can't be accounted for, and making the parameter required means a
+ * new call site cannot silently escape metering.
+ *
+ * Failures are recorded too. A provider that errors after reading the prompt has
+ * already spent input tokens, and a run of failures against one provider is
+ * exactly what an admin needs to see.
+ */
+async function metered<T>(
+  ctx: UsageContext,
+  meta: { provider: Provider; model: string; kind: UsageKind },
+  call: () => Promise<T>,
+  usageOf: (result: T) => unknown
+): Promise<T> {
+  const startedAt = Date.now()
+  try {
+    const result = await call()
+    await recordLlmUsage({
+      ctx,
+      ...meta,
+      usage: usageOf(result),
+      responseTime: Date.now() - startedAt,
+      success: true,
+    })
+    return result
+  } catch (error) {
+    await recordLlmUsage({
+      ctx,
+      ...meta,
+      responseTime: Date.now() - startedAt,
+      success: false,
+      error,
+    })
+    throw error
+  }
+}
+
+/**
+ * Per-provider wrappers. Each bakes in the pinned model and the one place that
+ * provider's SDK puts its token counts, so call sites only choose the `kind`.
+ */
+
+type GeminiParams = Parameters<GoogleGenAI['models']['generateContent']>[0]
+
+const geminiRequest = (ctx: UsageContext, kind: UsageKind, params: GeminiParams) =>
+  metered(
+    ctx,
+    { provider: 'gemini', model: GEMINI_MODEL, kind },
+    () => getGemini().models.generateContent(params),
+    response => response.usageMetadata
+  )
+
+const openaiRequest = (
+  ctx: UsageContext,
+  kind: UsageKind,
+  params: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming
+) =>
+  metered(
+    ctx,
+    { provider: 'openai', model: GPT_MODEL, kind },
+    () => getOpenAI().chat.completions.create(params),
+    response => response.usage
+  )
+
+const anthropicRequest = (
+  ctx: UsageContext,
+  kind: UsageKind,
+  params: Anthropic.MessageCreateParamsNonStreaming
+) =>
+  metered(
+    ctx,
+    { provider: 'anthropic', model: CLAUDE_MODEL, kind },
+    () => getAnthropic().messages.create(params),
+    response => response.usage
+  )
 
 const REQUIREMENTS_BLOCK_INSTRUCTION = `IMPORTANT: At the end of EVERY response you MUST append a requirements block in exactly this format (even if no requirements were discussed — output an empty array):
 [REQUIREMENTS_JSON]
@@ -152,9 +242,9 @@ Return ONLY a JSON array, with no prose before or after it:
 
 // ── Gemini ────────────────────────────────────────────────────────────────────
 
-export async function analyzeDocumentWithGemini(text: string) {
+export async function analyzeDocumentWithGemini(text: string, ctx: UsageContext) {
   try {
-    const response = await getGemini().models.generateContent({
+    const response = await geminiRequest(ctx, 'document', {
       model: GEMINI_MODEL,
       contents: analysisPrompt(text),
       config: { maxOutputTokens: MAX_OUTPUT_TOKENS.analysis },
@@ -165,13 +255,13 @@ export async function analyzeDocumentWithGemini(text: string) {
   }
 }
 
-export async function chatWithGemini(messages: ChatMessage[]) {
+export async function chatWithGemini(messages: ChatMessage[], ctx: UsageContext) {
   try {
     const conversationContext = capMessages(messages)
       .map(msg => `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
       .join('\n\n')
 
-    const response = await getGemini().models.generateContent({
+    const response = await geminiRequest(ctx, 'chat', {
       model: GEMINI_MODEL,
       contents: `${CHAT_SYSTEM_PROMPT}\n\nConversation so far:\n${conversationContext}`,
       config: { maxOutputTokens: MAX_OUTPUT_TOKENS.chat },
@@ -182,9 +272,13 @@ export async function chatWithGemini(messages: ChatMessage[]) {
   }
 }
 
-export async function analyzePDFWithGemini(base64PDF: string, filename: string) {
+export async function analyzePDFWithGemini(
+  base64PDF: string,
+  filename: string,
+  ctx: UsageContext
+) {
   try {
-    const response = await getGemini().models.generateContent({
+    const response = await geminiRequest(ctx, 'pdf', {
       model: GEMINI_MODEL,
       contents: [
         {
@@ -236,9 +330,9 @@ IMPORTANT:
 
 // ── OpenAI ────────────────────────────────────────────────────────────────────
 
-export async function analyzeDocumentWithGPT(text: string) {
+export async function analyzeDocumentWithGPT(text: string, ctx: UsageContext) {
   try {
-    const response = await getOpenAI().chat.completions.create({
+    const response = await openaiRequest(ctx, 'document', {
       model: GPT_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.analysis,
       messages: [
@@ -257,9 +351,9 @@ export async function analyzeDocumentWithGPT(text: string) {
   }
 }
 
-export async function chatWithGPT(messages: ChatMessage[]) {
+export async function chatWithGPT(messages: ChatMessage[], ctx: UsageContext) {
   try {
-    const response = await getOpenAI().chat.completions.create({
+    const response = await openaiRequest(ctx, 'chat', {
       model: GPT_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.chat,
       messages: [{ role: 'system', content: CHAT_SYSTEM_PROMPT }, ...capMessages(messages)],
@@ -273,9 +367,9 @@ export async function chatWithGPT(messages: ChatMessage[]) {
 
 // ── Claude ────────────────────────────────────────────────────────────────────
 
-export async function chatWithClaude(messages: ChatMessage[]) {
+export async function chatWithClaude(messages: ChatMessage[], ctx: UsageContext) {
   try {
-    const response = await getAnthropic().messages.create({
+    const response = await anthropicRequest(ctx, 'chat', {
       model: CLAUDE_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.chat,
       system: CHAT_SYSTEM_PROMPT,
@@ -287,9 +381,9 @@ export async function chatWithClaude(messages: ChatMessage[]) {
   }
 }
 
-export async function analyzeDocumentWithClaude(text: string) {
+export async function analyzeDocumentWithClaude(text: string, ctx: UsageContext) {
   try {
-    const response = await getAnthropic().messages.create({
+    const response = await anthropicRequest(ctx, 'document', {
       model: CLAUDE_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.analysis,
       messages: [{ role: 'user', content: analysisPrompt(text) }],
@@ -311,6 +405,7 @@ export async function analyzeDocumentWithClaude(text: string) {
  */
 export async function analyzeDocument(
   text: string,
+  ctx: UsageContext,
   preferredModel: 'gemini' | 'gpt' | 'claude' = 'gemini'
 ) {
   const models = {
@@ -328,7 +423,7 @@ export async function analyzeDocument(
 
   for (const modelName of fallbackOrder) {
     try {
-      const result = await models[modelName](text)
+      const result = await models[modelName](text, ctx)
       if (result) return { result, model: modelName }
       console.warn(`${modelName} returned an empty response`)
     } catch (error) {
@@ -344,6 +439,7 @@ export async function analyzeDocument(
 export async function generateSRSDocument(
   requirements: any[],
   projectName: string,
+  ctx: UsageContext,
   projectDescription?: string
 ) {
   // Cap the requirement set so the prompt cannot grow without bound.
@@ -409,7 +505,7 @@ Use the provided requirements to populate relevant sections. Be professional, de
 Format the output in Markdown with proper headings, bullet points, and numbered lists.`
 
   try {
-    const geminiResponse = await getGemini().models.generateContent({
+    const geminiResponse = await geminiRequest(ctx, 'srs', {
       model: GEMINI_MODEL,
       contents: prompt,
       config: { maxOutputTokens: MAX_OUTPUT_TOKENS.srs },
@@ -420,7 +516,7 @@ Format the output in Markdown with proper headings, bullet points, and numbered 
   }
 
   try {
-    const gptResponse = await getOpenAI().chat.completions.create({
+    const gptResponse = await openaiRequest(ctx, 'srs', {
       model: GPT_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.srs,
       messages: [
@@ -440,7 +536,7 @@ Format the output in Markdown with proper headings, bullet points, and numbered 
   }
 
   try {
-    const claudeResponse = await getAnthropic().messages.create({
+    const claudeResponse = await anthropicRequest(ctx, 'srs', {
       model: CLAUDE_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.srs,
       messages: [{ role: 'user', content: prompt }],
@@ -461,7 +557,8 @@ Format the output in Markdown with proper headings, bullet points, and numbered 
  * Returns a map of requirementId → sub-task strings.
  */
 export async function generateTrelloSubTasks(
-  requirements: { id: string; title: string; description: string; type: string }[]
+  requirements: { id: string; title: string; description: string; type: string }[],
+  ctx: UsageContext
 ): Promise<Record<string, string[]>> {
   if (requirements.length === 0) return {}
 
@@ -511,7 +608,7 @@ Example format:
   }
 
   try {
-    const geminiResponse = await getGemini().models.generateContent({
+    const geminiResponse = await geminiRequest(ctx, 'subtasks', {
       model: GEMINI_MODEL,
       contents: prompt,
       config: { maxOutputTokens: MAX_OUTPUT_TOKENS.subTasks },
@@ -523,7 +620,7 @@ Example format:
   }
 
   try {
-    const gptResponse = await getOpenAI().chat.completions.create({
+    const gptResponse = await openaiRequest(ctx, 'subtasks', {
       model: GPT_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.subTasks,
       messages: [
@@ -539,7 +636,7 @@ Example format:
   }
 
   try {
-    const claudeResponse = await getAnthropic().messages.create({
+    const claudeResponse = await anthropicRequest(ctx, 'subtasks', {
       model: CLAUDE_MODEL,
       max_tokens: MAX_OUTPUT_TOKENS.subTasks,
       messages: [{ role: 'user', content: prompt }],

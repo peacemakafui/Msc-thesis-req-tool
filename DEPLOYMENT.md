@@ -124,10 +124,33 @@ ANTHROPIC_API_KEY=...                        # second fallback
 # ── Trello (shared researcher account) ──────────────────────────────────────
 TRELLO_API_KEY=...
 TRELLO_TOKEN=...
+
+# ── Admin dashboard (optional — bootstrap only) ──────────────────────────────
+ADMIN_EMAILS="you@example.com"               # comma-separated; promoted on first sign-in
 ```
 
 `PARTICIPANT_ACCESS_CODE` has no default **on purpose**. If it is unset, every
 signup is rejected with a 503 rather than silently allowing open registration.
+
+### Getting admin access
+
+The admin dashboard lives at `/dashboard/admin` and is only linked in the sidebar
+for admins. Two ways to become one:
+
+```bash
+# Local, or anywhere you have a shell:
+npm run db:make-admin -- you@example.com
+npm run db:make-admin                        # no argument: list current admins
+
+# Container deployments with no shell: set ADMIN_EMAILS and sign in once.
+# The role is written to the database on that first check, after which the env
+# var can be removed.
+```
+
+Sign up through the normal participant flow first — the script promotes an
+existing account, it does not create one. The role is always read from the
+database, never from the session cookie, so a promotion takes effect on the next
+request without signing out.
 
 ## 2. Usage limits (all optional, all have defaults)
 
@@ -156,8 +179,16 @@ LLM_DISABLED=true   # restart; every AI endpoint returns 429, no provider is cal
 
 ### Cutting off one participant
 
-Set `blocked = true` on their `users` row. They can still sign in and read their
-data, but every AI request is refused.
+Use **Manage → Deactivate account** on `/dashboard/admin`. It records who
+deactivated the account, when, and why, and takes effect on the participant's very
+next request — their existing session is not honoured, because `requireAuth()` and
+the dashboard layout both re-read `blocked` from the database rather than trusting
+the JWT. Their data is kept; deactivation is a flag, not a delete.
+
+The same dialog can restore a participant's daily allowance or reset their whole
+study allowance, which is the usual answer to "I ran out halfway through the task".
+
+The equivalent by hand, if you only have database access:
 
 ```sql
 UPDATE users SET blocked = 1 WHERE email = 'someone@example.com';
@@ -183,6 +214,26 @@ a rejected request costs nothing.
 
 Counters are consumed with single atomic conditional `UPDATE` statements, so two
 concurrent requests can't both pass the same check.
+
+### Seeing what was actually spent
+
+The four layers above bound the *number* of calls. They say nothing about cost, so
+every provider request also appends a row to `llm_usage` with the token counts the
+provider reported and an indicative USD figure (`src/lib/tokenUsage.ts`). That is
+what the admin dashboard's token and cost figures come from, and what
+`/api/admin/export` writes to CSV for the write-up.
+
+Two things to know when reading those numbers:
+
+- **Failed attempts are included**, marked `success = false`. A provider that
+  errors after reading the prompt has still spent input tokens, and one metered
+  "call" can make up to three provider requests as it falls down the chain — so
+  `provider_requests` is legitimately higher than `llm_calls_total`.
+- **The prices are hardcoded list prices** for the three pinned models. They are
+  indicative, not billing data; update the `PRICING` table if a model or its price
+  changes. Metering started when this table was added, so accounts that were
+  active before then show quota consumed and no tokens — the dashboard says so
+  rather than implying they spent nothing.
 
 ### The expensive path to know about
 

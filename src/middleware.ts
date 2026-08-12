@@ -25,6 +25,11 @@ const PROTECTED_PAGES = [/^\/dashboard(\/|$)/]
 const PROTECTED_APIS = [
   /^\/api\/(upload|process-document|chat|generate-srs|export-requirements|usage)(\/|$)/,
   /^\/api\/(requirements|projects|trello)(\/|$)/,
+  // Authentication only. The ADMIN check is deliberately not done here: the JWT
+  // carries the role from sign-in, so an account promoted afterwards would be
+  // refused at the edge while the database says it is an admin. requireAdmin()
+  // and the admin page both re-read the role from the database instead.
+  /^\/api\/admin(\/|$)/,
 ]
 
 export async function middleware(request: NextRequest) {

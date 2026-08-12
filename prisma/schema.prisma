@@ -41,8 +41,14 @@ model User {
   // Backstop across every metered LLM operation, regardless of kind.
   totalLlmCalls Int @default(0)
 
-  // Set true to cut a participant off without deleting their data.
-  blocked Boolean @default(false)
+  // Set true to cut a participant off without deleting their data. Enforced in
+  // requireAuth() (every API route) and in the dashboard layout, not just at the
+  // quota layer, so a suspended account cannot use the app at all.
+  blocked       Boolean   @default(false)
+  blockedAt     DateTime?
+  blockedReason String?
+  /** Email of the admin who last changed the block state — a light audit trail. */
+  blockedBy     String?
 
   // NextAuth fields
   emailVerified DateTime?
@@ -54,8 +60,48 @@ model User {
   sessions    AppSession[]
   interactions UserInteraction[]
   chatMessages ChatMessage[]
+  llmUsage     LlmUsage[]
 
   @@map("users")
+}
+
+/**
+ * One row per provider request, written by src/lib/llm.ts.
+ *
+ * The counters on User bound how many calls a participant may make; this table
+ * records what those calls actually cost. It is append-only and deliberately
+ * separate from the counters: a fallback chain can make three provider requests
+ * for one metered "call", and each one spends tokens that need accounting for.
+ *
+ * Failed attempts are recorded too (success = false) — a provider can burn input
+ * tokens and then error, so leaving failures out would understate spend.
+ */
+model LlmUsage {
+  id       String  @id @default(cuid())
+  provider String // gemini | openai | anthropic
+  model    String
+  /** Which app operation the call belongs to: chat, document, pdf, srs, subtasks. */
+  kind     String
+
+  promptTokens     Int   @default(0)
+  completionTokens Int   @default(0)
+  totalTokens      Int   @default(0)
+  /** Derived at write time from the model's published per-token price, in USD. */
+  costUsd          Float @default(0)
+
+  success      Boolean @default(true)
+  /** Provider error class, when the call failed. Never the raw message. */
+  error        String?
+  responseTime Int? // milliseconds
+
+  createdAt DateTime @default(now())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@map("llm_usage")
 }
 
 // NextAuth models

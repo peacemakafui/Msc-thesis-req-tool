@@ -134,7 +134,9 @@ export async function POST(request: NextRequest) {
           extractionError = 'PDF too large for analysis'
         } else {
           try {
-            const llmResponse = await analyzePDFWithGemini(buffer.toString('base64'), file.name)
+            const llmResponse = await analyzePDFWithGemini(buffer.toString('base64'), file.name, {
+              userId: user.id,
+            })
             if (!llmResponse) throw new Error('LLM response is empty')
 
             let cleanResponse = llmResponse.trim()

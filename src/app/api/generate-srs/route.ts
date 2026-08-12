@@ -42,6 +42,7 @@ export async function POST(request: NextRequest) {
     const srsContent = await generateSRSDocument(
       project.requirements,
       project.name,
+      { userId: user.id },
       project.description || undefined
     )
 

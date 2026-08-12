@@ -105,15 +105,19 @@ export async function POST(request: NextRequest) {
     let llmResponse: string | null = null
     let usedModel = 'gemini'
 
+    // Every provider attempt is metered against this participant, including the
+    // ones that fail on the way down the chain (see lib/tokenUsage.ts).
+    const usageCtx = { userId: user.id }
+
     try {
-      llmResponse = (await chatWithGemini(messages)) || null
+      llmResponse = (await chatWithGemini(messages, usageCtx)) || null
       usedModel = 'gemini'
     } catch {
       try {
-        llmResponse = (await chatWithGPT(messages)) || null
+        llmResponse = (await chatWithGPT(messages, usageCtx)) || null
         usedModel = 'gpt'
       } catch {
-        llmResponse = (await chatWithClaude(messages)) || null
+        llmResponse = (await chatWithClaude(messages, usageCtx)) || null
         usedModel = 'claude'
       }
     }

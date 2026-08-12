@@ -15,6 +15,7 @@ import {
   Menu,
   X,
   Sparkles,
+  ShieldCheck,
 } from 'lucide-react'
 import { cn } from './ui'
 
@@ -26,6 +27,9 @@ const NAV_ITEMS = [
   { href: '/dashboard/projects', label: 'Projects', icon: FolderOpen },
 ]
 
+/** Shown only to admins. The page re-checks the role server-side regardless. */
+const ADMIN_NAV_ITEM = { href: '/dashboard/admin', label: 'Admin', icon: ShieldCheck }
+
 interface Usage {
   chatDailyRemaining: number
   chatLifetimeRemaining: number
@@ -35,7 +39,15 @@ interface Usage {
   limits: { dailyChat: number; dailyUpload: number; totalRequests: number }
 }
 
-export default function Sidebar({ userName, userEmail }: { userName: string; userEmail: string }) {
+export default function Sidebar({
+  userName,
+  userEmail,
+  isAdmin = false,
+}: {
+  userName: string
+  userEmail: string
+  isAdmin?: boolean
+}) {
   const pathname = usePathname()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [usage, setUsage] = useState<Usage | null>(null)
@@ -76,7 +88,7 @@ export default function Sidebar({ userName, userEmail }: { userName: string; use
       </div>
 
       <nav className="flex-1 space-y-0.5 px-3">
-        {NAV_ITEMS.map(({ href, label, icon: Icon }) => {
+        {(isAdmin ? [...NAV_ITEMS, ADMIN_NAV_ITEM] : NAV_ITEMS).map(({ href, label, icon: Icon }) => {
           const active = isActive(href)
           return (
             <Link

@@ -82,6 +82,7 @@ export async function POST(request: NextRequest) {
     const { result: llmResponse, model: usedModel } = await analyzeDocument(
       // llm.ts truncates too; doing it here keeps the cap visible at the call site.
       document.extractedText.slice(0, MAX_DOCUMENT_TEXT_CHARS),
+      { userId: user.id },
       'gemini'
     )
     const responseTime = Date.now() - startTime
